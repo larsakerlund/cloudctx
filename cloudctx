@@ -42,10 +42,91 @@ def cmd_list(args) -> int:
 
 
 # --------------------------------------------------------------------------
-# Registry (TOML) — implemented in Task 2; minimal stub for Task 1.
+# Registry (TOML)
+#
+# tomllib is 3.11+ and read-only; on the 3.9 build machine it is absent, so we
+# fall back to a tiny parser for our restricted schema (flat [name] tables with
+# key = "value" string pairs). There is no stdlib TOML *writer* on any version,
+# so _dump_toml is always hand-rolled.
 # --------------------------------------------------------------------------
+try:
+    import tomllib as _tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    _tomllib = None
+
+
+def _parse_toml(text: str) -> dict:
+    """Minimal TOML reader for our schema: [table] headers and key = "string"."""
+    result: dict = {}
+    table = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            table = line[1:-1].strip()
+            result.setdefault(table, {})
+            continue
+        if "=" not in line or table is None:
+            continue
+        key, _, rhs = line.partition("=")
+        result[table][key.strip()] = _parse_value(rhs.strip())
+    return result
+
+
+def _parse_value(rhs: str) -> str:
+    """Parse the right-hand side of `key = value`. Quoted strings honor \\" and
+    \\\\ escapes; a trailing ` # comment` outside the quotes is ignored."""
+    if rhs.startswith('"'):
+        out = []
+        i = 1
+        while i < len(rhs):
+            ch = rhs[i]
+            if ch == "\\" and i + 1 < len(rhs):
+                nxt = rhs[i + 1]
+                out.append({'"': '"', "\\": "\\", "n": "\n", "t": "\t"}.get(nxt, nxt))
+                i += 2
+                continue
+            if ch == '"':
+                break
+            out.append(ch)
+            i += 1
+        return "".join(out)
+    # bare value (lenient): strip an inline comment
+    return rhs.split("#", 1)[0].strip().strip('"')
+
+
+def _escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _dump_toml(data: dict) -> str:
+    chunks = []
+    for name in sorted(data):
+        chunks.append(f"[{name}]")
+        for key in data[name]:
+            chunks.append(f'{key} = "{_escape(str(data[name][key]))}"')
+        chunks.append("")  # blank line between tables
+    return "\n".join(chunks).rstrip("\n") + "\n"
+
+
 def load_registry() -> dict:
-    return {}
+    path = registry_path()
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    if _tomllib is not None:
+        return _tomllib.loads(text)
+    return _parse_toml(text)
+
+
+def save_registry(data: dict) -> None:
+    root = REGISTRY_ROOT()
+    root.mkdir(parents=True, exist_ok=True)
+    path = registry_path()
+    tmp = path.with_suffix(".toml.tmp")
+    tmp.write_text(_dump_toml(data), encoding="utf-8")
+    os.replace(tmp, path)  # atomic on POSIX
 
 
 # --------------------------------------------------------------------------

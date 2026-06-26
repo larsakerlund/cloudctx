@@ -58,5 +58,33 @@ class TestList(Base):
         self.assertIn("no contexts", out.lower())
 
 
+class TestRegistry(Base):
+    def test_roundtrip(self):
+        data = {"acme": {"display": "Acme AB", "color": "#c0392b",
+                         "azure_tenant": "t-1", "azure_subscription": "Prod Sub"}}
+        self.cc.save_registry(data)
+        self.assertEqual(self.cc.load_registry(), data)
+
+    def test_parse_with_comments(self):
+        text = '# top comment\n\n[acme]\ndisplay = "Acme AB"  # trailing comment\ncolor = "#c0392b"\n'
+        self.assertEqual(
+            self.cc._parse_toml(text),
+            {"acme": {"display": "Acme AB", "color": "#c0392b"}},
+        )
+
+    def test_missing_file(self):
+        self.assertEqual(self.cc.load_registry(), {})
+
+    def test_value_with_special_chars_roundtrips(self):
+        # values containing spaces, '#', quotes and backslashes survive
+        data = {"x": {"display": 'A "quoted" #1 \\ name'}}
+        self.cc.save_registry(data)
+        self.assertEqual(self.cc.load_registry(), data)
+
+    def test_hash_inside_quotes_not_treated_as_comment(self):
+        text = '[a]\ncolor = "#ff0000"\n'
+        self.assertEqual(self.cc._parse_toml(text), {"a": {"color": "#ff0000"}})
+
+
 if __name__ == "__main__":
     unittest.main()
