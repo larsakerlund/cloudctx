@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# macOS
+.DS_Store
+
+# Local scratch / test contexts (never commit real credential stores)
+/.cloudctx-test/
+scratch/
