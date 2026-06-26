@@ -9,10 +9,14 @@ Sections below: paths, TOML registry, color helpers, env emission,
 decorate emission, commands, argparse dispatch.
 """
 import argparse
+import base64
 import os
 import re
 import sys
 from pathlib import Path
+
+ESC = "\x1b"
+BEL = "\x07"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -244,6 +248,76 @@ def cmd_env(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# Color helpers. A single `color = "#rrggbb"` registry field feeds two distinct
+# encodings: packed hex for the iTerm2 SetColors escape code (here), and
+# float components 0.0-1.0 for Dynamic Profiles JSON (build_profiles, later).
+# --------------------------------------------------------------------------
+def hex_to_rgb255(color: str):
+    c = color.lstrip("#").strip()
+    if len(c) == 3:
+        c = "".join(ch * 2 for ch in c)
+    if len(c) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in c):
+        raise ValueError(f"bad color {color!r}")
+    return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+
+
+def rgb_floats(color: str):
+    r, g, b = hex_to_rgb255(color)
+    return r / 255, g / 255, b / 255
+
+
+def _hex6(color: str) -> str:
+    r, g, b = hex_to_rgb255(color)
+    return f"{r:02x}{g:02x}{b:02x}"
+
+
+# --------------------------------------------------------------------------
+# Decorate emission — raw iTerm2 escape sequences. `ctx use` runs this WITHOUT
+# command substitution so the bytes reach the controlling tty and render.
+# Verified sequences: badge needs base64; tab color is packed hex (no '#').
+# --------------------------------------------------------------------------
+def _badge_seq(text: str) -> str:
+    b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return f"{ESC}]1337;SetBadgeFormat={b64}{BEL}"
+
+
+def _title_seq(text: str) -> str:
+    return f"{ESC}]0;{text}{BEL}"  # OSC 0 sets both tab and window title
+
+
+def _tabcolor_seq(hex6: str) -> str:
+    return f"{ESC}]1337;SetColors=tab={hex6}{BEL}"
+
+
+def decorate_bytes(name: str) -> str:
+    entry = load_registry()[name]
+    display = entry.get("display") or name
+    out = _badge_seq(display) + _title_seq(display)
+    color = entry.get("color")
+    if color:
+        try:
+            out += _tabcolor_seq(_hex6(color))
+        except ValueError:
+            pass  # malformed color: skip the tab-color sequence, don't crash
+    return out
+
+
+def decorate_clear() -> str:
+    return (f"{ESC}]1337;SetBadgeFormat={BEL}"          # empty badge payload
+            f"{ESC}]1337;SetColors=tab=default{BEL}")    # documented reset
+
+
+def cmd_decorate(args) -> int:
+    if args.clear:
+        sys.stdout.write(decorate_clear())
+        return 0
+    if not args.name or args.name not in load_registry():
+        return die(f"unknown context {args.name!r}")
+    sys.stdout.write(decorate_bytes(args.name))
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -273,6 +347,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_env.add_argument("name", nargs="?")
     p_env.add_argument("--clear", action="store_true")
     p_env.set_defaults(func=cmd_env)
+
+    p_dec = sub.add_parser("_decorate", help="(internal) emit iTerm2 escape sequences")
+    p_dec.add_argument("name", nargs="?")
+    p_dec.add_argument("--clear", action="store_true")
+    p_dec.set_defaults(func=cmd_decorate)
 
     return p
 

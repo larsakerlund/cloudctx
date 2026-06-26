@@ -173,5 +173,50 @@ class TestEnv(Base):
         self.assertIn("unset AWS_PROFILE", out)
 
 
+class TestDecorate(Base):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("new", "acme", "--display", "Acme AB", "--color", "#c0392b",
+                     "--azure-tenant", "t", "--no-login")
+
+    def test_badge_is_base64_of_display(self):
+        import base64
+        code, out = self.run_cli("_decorate", "acme")
+        self.assertEqual(code, 0)
+        b64 = base64.b64encode("Acme AB".encode()).decode()
+        self.assertIn("\x1b]1337;SetBadgeFormat=" + b64 + "\x07", out)
+
+    def test_title_sequence(self):
+        _, out = self.run_cli("_decorate", "acme")
+        self.assertIn("\x1b]0;Acme AB\x07", out)
+
+    def test_tab_color_is_packed_hex_no_hash(self):
+        _, out = self.run_cli("_decorate", "acme")
+        self.assertIn("\x1b]1337;SetColors=tab=c0392b\x07", out)
+
+    def test_clear_resets_tab_color(self):
+        _, out = self.run_cli("_decorate", "--clear")
+        self.assertIn("SetColors=tab=default", out)
+        # badge cleared (empty payload)
+        self.assertIn("\x1b]1337;SetBadgeFormat=\x07", out)
+
+    def test_hex_to_rgb255(self):
+        self.assertEqual(self.cc.hex_to_rgb255("#c0392b"), (192, 57, 43))
+        self.assertEqual(self.cc.hex_to_rgb255("c0392b"), (192, 57, 43))
+        self.assertEqual(self.cc.hex_to_rgb255("#f00"), (255, 0, 0))
+
+    def test_rgb_floats(self):
+        r, g, b = self.cc.rgb_floats("#ff0000")
+        self.assertAlmostEqual(r, 1.0)
+        self.assertAlmostEqual(g, 0.0)
+        self.assertAlmostEqual(b, 0.0)
+
+    def test_no_color_skips_tab_color(self):
+        self.run_cli("new", "nocolor", "--display", "No Color", "--no-login")
+        _, out = self.run_cli("_decorate", "nocolor")
+        self.assertNotIn("SetColors=tab=", out)
+        self.assertIn("SetBadgeFormat=", out)  # badge still set
+
+
 if __name__ == "__main__":
     unittest.main()
