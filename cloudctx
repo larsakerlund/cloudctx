@@ -10,8 +10,16 @@ decorate emission, commands, argparse dispatch.
 """
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
+
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Optional fields accepted by `new`, mapped to their registry keys.
+AZURE_FIELDS = ["azure_tenant", "azure_subscription"]
+AWS_FIELDS = ["aws_sso_start_url", "aws_sso_region", "aws_account_id",
+              "aws_role", "aws_profile"]
 
 
 # --------------------------------------------------------------------------
@@ -26,9 +34,64 @@ def registry_path() -> Path:
     return REGISTRY_ROOT() / "contexts.toml"
 
 
+def context_dir(name: str) -> Path:
+    return REGISTRY_ROOT() / name
+
+
+def azure_dir(name: str) -> Path:
+    return context_dir(name) / "azure"
+
+
+def aws_config(name: str) -> Path:
+    return context_dir(name) / "aws" / "config"
+
+
+def aws_credentials(name: str) -> Path:
+    return context_dir(name) / "aws" / "credentials"
+
+
+def die(msg: str) -> int:
+    print(f"cloudctx: error: {msg}", file=sys.stderr)
+    return 1
+
+
 # --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
+def cmd_new(args) -> int:
+    name = args.name
+    if not NAME_RE.match(name):
+        return die(f"invalid context name {name!r} (use letters, digits, '-', '_')")
+    registry = load_registry()
+    if name in registry:
+        return die(f"context {name!r} already exists")
+
+    azure_dir(name).mkdir(parents=True, exist_ok=True)
+    (context_dir(name) / "aws").mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(context_dir(name), 0o700)  # credential store: owner-only
+    except OSError:
+        pass
+
+    entry = {}
+    if args.display:
+        entry["display"] = args.display
+    if args.color:
+        entry["color"] = args.color
+    for field in AZURE_FIELDS + AWS_FIELDS:
+        value = getattr(args, field, None)
+        if value:
+            entry[field] = value
+    entry.setdefault("display", name)
+    registry[name] = entry
+    save_registry(registry)
+    print(f"created context {name!r} at {context_dir(name)}")
+
+    if not args.no_login:
+        print(f"next: authenticate with  ctx login {name}")
+    return 0
+
+
 def cmd_list(args) -> int:
     registry = load_registry()
     if not registry:
@@ -138,6 +201,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_list = sub.add_parser("list", help="list contexts; mark the active one")
     p_list.set_defaults(func=cmd_list)
+
+    p_new = sub.add_parser("new", help="scaffold a context + registry entry")
+    p_new.add_argument("name")
+    p_new.add_argument("--display", help="human-readable label")
+    p_new.add_argument("--color", help="iTerm2 tab/badge color, e.g. #c0392b")
+    p_new.add_argument("--azure-tenant", dest="azure_tenant")
+    p_new.add_argument("--azure-subscription", dest="azure_subscription")
+    p_new.add_argument("--aws-sso-start-url", dest="aws_sso_start_url")
+    p_new.add_argument("--aws-sso-region", dest="aws_sso_region")
+    p_new.add_argument("--aws-account-id", dest="aws_account_id")
+    p_new.add_argument("--aws-role", dest="aws_role")
+    p_new.add_argument("--aws-profile", dest="aws_profile")
+    p_new.add_argument("--no-login", action="store_true",
+                       help="scaffold only; skip first-time authentication")
+    p_new.set_defaults(func=cmd_new)
 
     return p
 

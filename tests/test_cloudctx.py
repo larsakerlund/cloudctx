@@ -86,5 +86,41 @@ class TestRegistry(Base):
         self.assertEqual(self.cc._parse_toml(text), {"a": {"color": "#ff0000"}})
 
 
+class TestNew(Base):
+    def test_new_scaffolds_dirs_and_registry(self):
+        code, _ = self.run_cli(
+            "new", "acme", "--display", "Acme AB", "--color", "#c0392b",
+            "--azure-tenant", "t-1", "--azure-subscription", "Prod", "--no-login",
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(self.cc.azure_dir("acme").is_dir())
+        self.assertTrue(self.cc.context_dir("acme").joinpath("aws").is_dir())
+        reg = self.cc.load_registry()
+        self.assertEqual(reg["acme"]["display"], "Acme AB")
+        self.assertEqual(reg["acme"]["azure_tenant"], "t-1")
+
+    def test_new_rejects_duplicate(self):
+        self.run_cli("new", "acme", "--no-login")
+        code, out = self.run_cli("new", "acme", "--no-login")
+        self.assertNotEqual(code, 0)
+        self.assertIn("exists", out.lower())
+
+    def test_new_rejects_invalid_name(self):
+        code, out = self.run_cli("new", "a b", "--no-login")
+        self.assertNotEqual(code, 0)
+
+    def test_list_marks_active(self):
+        self.run_cli("new", "acme", "--no-login")
+        self.run_cli("new", "globex", "--no-login")
+        os.environ["CLOUDCTX_CONTEXT"] = "globex"
+        code, out = self.run_cli("list")
+        self.assertEqual(code, 0)
+        self.assertIn("acme", out)
+        self.assertIn("globex", out)
+        # the active line is the one marked with *
+        active_line = [ln for ln in out.splitlines() if "globex" in ln][0]
+        self.assertIn("*", active_line)
+
+
 if __name__ == "__main__":
     unittest.main()
