@@ -429,6 +429,72 @@ def cmd_status(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# Windowing — open a new iTerm2 window/tab already scoped to a context.
+# iTerm2's AppleScript is frozen but stable; we drive it via osascript argv
+# (no shell), escaping only the AppleScript string literal.
+# --------------------------------------------------------------------------
+def applescript_escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def build_open_command(name: str, cd=None, claude=False) -> str:
+    parts = [f"ctx use {name}"]
+    if cd:
+        parts.append(f"cd {shquote(cd)}")
+    if claude:
+        parts.append("claude")
+    return " && ".join(parts)
+
+
+def open_osascript_argv(command: str, tab=False):
+    esc = applescript_escape(command)
+    if tab:
+        body = [
+            'tell application "iTerm2"',
+            'tell current window',
+            'set _t to (create tab with default profile)',
+            'end tell',
+            'tell current session of current window',
+            f'write text "{esc}"',
+            'end tell',
+            'end tell',
+        ]
+    else:
+        body = [
+            'tell application "iTerm2"',
+            'set _w to (create window with default profile)',
+            'tell current session of _w',
+            f'write text "{esc}"',
+            'end tell',
+            'end tell',
+        ]
+    argv = ["osascript"]
+    for line in body:
+        argv += ["-e", line]
+    return argv
+
+
+def cmd_open(args) -> int:
+    if args.name not in load_registry():
+        return die(f"unknown context {args.name!r}")
+    command = build_open_command(args.name, cd=getattr(args, "cd", None),
+                                 claude=getattr(args, "claude", False))
+    argv = open_osascript_argv(command, tab=getattr(args, "tab", False))
+    if getattr(args, "dry_run", False):
+        print("\n".join(argv))
+        return 0
+    if not shutil.which("osascript"):
+        return die("osascript not found — `ctx open` needs macOS + iTerm2")
+    return subprocess.run(argv).returncode
+
+
+def cmd_claude(args) -> int:
+    return cmd_open(argparse.Namespace(
+        name=args.name, cd=args.path, claude=True,
+        tab=getattr(args, "tab", False), dry_run=getattr(args, "dry_run", False)))
+
+
+# --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -483,6 +549,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_login.add_argument("--dry-run", action="store_true",
                          help="print the auth commands instead of running them")
     p_login.set_defaults(func=cmd_login)
+
+    p_open = sub.add_parser("open", help="open a new iTerm2 window/tab scoped to a context")
+    p_open.add_argument("name")
+    p_open.add_argument("--cd", help="cd to this path in the new session")
+    p_open.add_argument("--tab", action="store_true", help="new tab instead of window")
+    p_open.add_argument("--claude", action="store_true", help="also run `claude`")
+    p_open.add_argument("--dry-run", action="store_true",
+                        help="print the osascript argv instead of running it")
+    p_open.set_defaults(func=cmd_open)
+
+    p_claude = sub.add_parser("claude", help="open a scoped window, cd, and run claude")
+    p_claude.add_argument("name")
+    p_claude.add_argument("path", nargs="?", help="project path to cd into")
+    p_claude.add_argument("--tab", action="store_true", help="new tab instead of window")
+    p_claude.add_argument("--dry-run", action="store_true",
+                          help="print the osascript argv instead of running it")
+    p_claude.set_defaults(func=cmd_claude)
 
     return p
 

@@ -294,5 +294,36 @@ class TestLogin(Base):
         self.assertNotEqual(code, 0)
 
 
+class TestOpen(Base):
+    def test_applescript_escape(self):
+        self.assertEqual(self.cc.applescript_escape('a"b\\c'), 'a\\"b\\\\c')
+
+    def test_open_argv_new_window(self):
+        argv = self.cc.open_osascript_argv("ctx use acme", tab=False)
+        self.assertEqual(argv[0], "osascript")
+        self.assertIn("set _w to (create window with default profile)", argv)
+        self.assertIn('write text "ctx use acme"', argv)
+
+    def test_open_argv_new_tab(self):
+        argv = self.cc.open_osascript_argv("ctx use acme", tab=True)
+        self.assertIn("set _t to (create tab with default profile)", argv)
+
+    def test_build_open_command_cd_and_claude(self):
+        cmd = self.cc.build_open_command("acme", cd="/x", claude=True)
+        self.assertEqual(cmd, "ctx use acme && cd '/x' && claude")
+
+    def test_open_dry_run(self):
+        self.run_cli("new", "acme", "--no-login")
+        code, out = self.run_cli("open", "acme", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn('write text "ctx use acme"', out)
+
+    def test_claude_dry_run_includes_claude(self):
+        self.run_cli("new", "acme", "--no-login")
+        code, out = self.run_cli("claude", "acme", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("&& claude", out)
+
+
 if __name__ == "__main__":
     unittest.main()
