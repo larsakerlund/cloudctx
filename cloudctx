@@ -94,6 +94,12 @@ def cmd_new(args) -> int:
     save_registry(registry)
     print(f"created context {name!r} at {context_dir(name)}")
 
+    if not getattr(args, "no_profiles", False):
+        try:
+            write_profiles()
+        except OSError:
+            pass  # e.g. no iTerm2 dir on a non-mac box; not fatal
+
     if not args.no_login:
         return cmd_login(argparse.Namespace(
             name=name, dry_run=False, device_code=getattr(args, "device_code", False)))
@@ -495,6 +501,61 @@ def cmd_claude(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# iTerm2 Dynamic Profiles — one profile per context in the profile menu. Uses
+# "Initial Text" (keeps an interactive shell, unlike "Custom Command"), a stable
+# Guid, and the Tab Color object whose components are floats 0.0-1.0.
+# --------------------------------------------------------------------------
+def profiles_path() -> Path:
+    override = os.environ.get("CLOUDCTX_PROFILES")
+    if override:
+        return Path(override)
+    return (Path.home() / "Library" / "Application Support" / "iTerm2"
+            / "DynamicProfiles" / "cloudctx.json")
+
+
+def build_profiles(registry: dict) -> dict:
+    profiles = []
+    for name in sorted(registry):
+        entry = registry[name]
+        display = entry.get("display") or name
+        prof = {
+            "Name": f"{display} (ctx)",
+            "Guid": f"cloudctx-{name}",  # stable across regenerations
+            "Initial Text": f"ctx use {name}",
+            "Custom Command": "No",
+            "Command": "",
+        }
+        color = entry.get("color")
+        if color:
+            try:
+                r, g, b = rgb_floats(color)
+                prof["Use Tab Color"] = True
+                prof["Tab Color"] = {
+                    "Red Component": r, "Green Component": g, "Blue Component": b,
+                    "Alpha Component": 1, "Color Space": "sRGB",
+                }
+            except ValueError:
+                pass  # malformed color: skip tab color, keep the profile
+        profiles.append(prof)
+    return {"Profiles": profiles}
+
+
+def write_profiles() -> Path:
+    path = profiles_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(build_profiles(load_registry()), indent=2),
+                    encoding="utf-8")
+    return path
+
+
+def cmd_gen_profiles(args) -> int:
+    path = write_profiles()
+    n = len(build_profiles(load_registry())["Profiles"])
+    print(f"wrote {n} profile(s) to {path}")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -519,6 +580,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="use Azure device-code login flow (headless)")
     p_new.add_argument("--no-login", action="store_true",
                        help="scaffold only; skip first-time authentication")
+    p_new.add_argument("--no-profiles", action="store_true",
+                       help="don't regenerate the iTerm2 dynamic profiles")
     p_new.set_defaults(func=cmd_new)
 
     # Internal: consumed by the sourced shell shim, not meant for direct use.
@@ -566,6 +629,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_claude.add_argument("--dry-run", action="store_true",
                           help="print the osascript argv instead of running it")
     p_claude.set_defaults(func=cmd_claude)
+
+    p_gen = sub.add_parser("gen-profiles",
+                           help="regenerate the iTerm2 dynamic profiles file")
+    p_gen.set_defaults(func=cmd_gen_profiles)
 
     return p
 

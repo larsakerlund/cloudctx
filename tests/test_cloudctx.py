@@ -325,5 +325,37 @@ class TestOpen(Base):
         self.assertIn("&& claude", out)
 
 
+class TestProfiles(Base):
+    def test_build_profiles_shape(self):
+        prof = self.cc.build_profiles(
+            {"acme": {"display": "Acme AB", "color": "#c0392b"}})
+        self.assertEqual(len(prof["Profiles"]), 1)
+        p = prof["Profiles"][0]
+        self.assertEqual(p["Guid"], "cloudctx-acme")
+        self.assertEqual(p["Initial Text"], "ctx use acme")
+        self.assertTrue(p["Use Tab Color"])
+        self.assertAlmostEqual(p["Tab Color"]["Red Component"], 192 / 255)
+        self.assertEqual(p["Tab Color"]["Color Space"], "sRGB")
+
+    def test_no_color_omits_tab_color(self):
+        p = self.cc.build_profiles({"x": {"display": "X"}})["Profiles"][0]
+        self.assertNotIn("Use Tab Color", p)
+
+    def test_gen_profiles_writes_valid_json(self):
+        import json
+        self.run_cli("new", "acme", "--color", "#c0392b", "--no-login", "--no-profiles")
+        code, _ = self.run_cli("gen-profiles")
+        self.assertEqual(code, 0)
+        path = self.cc.profiles_path()
+        data = json.loads(Path(path).read_text())
+        self.assertEqual(data["Profiles"][0]["Guid"], "cloudctx-acme")
+
+    def test_new_regenerates_profiles(self):
+        import json
+        self.run_cli("new", "acme", "--color", "#2980b9", "--no-login")
+        data = json.loads(Path(self.cc.profiles_path()).read_text())
+        self.assertEqual(len(data["Profiles"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
