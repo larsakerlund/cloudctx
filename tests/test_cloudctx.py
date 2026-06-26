@@ -96,6 +96,14 @@ class TestRegistry(Base):
         text = '[a]\ncolor = "#ff0000"\n'
         self.assertEqual(self.cc._parse_toml(text), {"a": {"color": "#ff0000"}})
 
+    def test_header_with_inline_comment(self):
+        # a hand-edited table header carrying a trailing comment must still
+        # parse (tomllib accepts `[acme]  # note`); the fallback must match it
+        # rather than silently dropping the whole table.
+        text = '[acme]  # prod account\ndisplay = "Acme AB"\n'
+        self.assertEqual(self.cc._parse_toml(text),
+                         {"acme": {"display": "Acme AB"}})
+
 
 class TestNew(Base):
     def test_new_scaffolds_dirs_and_registry(self):
@@ -159,8 +167,11 @@ class TestEnv(Base):
         self.run_cli("new", "globex", "--aws-profile", "globex", "--no-login")
         code, out = self.run_cli("_env", "globex")
         self.assertIn("export AWS_PROFILE='globex'", out)
-        self.assertIn("export AWS_CONFIG_FILE=", out)
-        self.assertIn("export AWS_SHARED_CREDENTIALS_FILE=", out)
+        # assert the VALUES point into globex's per-context store, not merely
+        # that the export lines exist — a regression pointing these at the
+        # global ~/.aws files is the exact isolation failure this tool prevents.
+        self.assertIn(str(self.cc.aws_config("globex").resolve()), out)
+        self.assertIn(str(self.cc.aws_credentials("globex").resolve()), out)
 
     def test_aws_profile_defaults_to_name(self):
         # an aws field present but no explicit aws_profile -> profile defaults to ctx name
@@ -188,9 +199,11 @@ class TestEnv(Base):
     def test_clear(self):
         code, out = self.run_cli("_env", "--clear")
         self.assertEqual(code, 0)
-        self.assertIn("unset AZURE_CONFIG_DIR", out)
-        self.assertIn("unset CLOUDCTX_CONTEXT", out)
-        self.assertIn("unset AWS_PROFILE", out)
+        # every managed var must be unset, so `ctx clear` leaves no stale
+        # isolation env behind; drive the assertion off the constant so the
+        # test stays in lockstep with CLEARABLE_VARS.
+        for var in self.cc.CLEARABLE_VARS:
+            self.assertIn(f"unset {var}", out)
 
 
 class TestDecorate(Base):

@@ -54,9 +54,10 @@ cloudctx_preexec() { _cctx_guard "$1"; }
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec cloudctx_preexec
 
-# Show the active context (and short Azure subscription label) in the prompt.
+# Show the active context (+ short Azure subscription label + AWS_PROFILE) in
+# the prompt. AWS_PROFILE is the only cloud indicator for an AWS-only context.
 # Single quotes + PROMPT_SUBST => re-evaluated on every redraw, stable per shell.
 # `%` in the (free-form) values is doubled so it is rendered literally and can
 # never act as a prompt escape.
 setopt PROMPT_SUBST
-PROMPT='${CLOUDCTX_CONTEXT:+%F{cyan}[${CLOUDCTX_CONTEXT//\%/%%}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL//\%/%%}}]%f }'"$PROMPT"
+PROMPT='${CLOUDCTX_CONTEXT:+%F{cyan}[${CLOUDCTX_CONTEXT//\%/%%}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL//\%/%%}}${AWS_PROFILE:+ aws:${AWS_PROFILE//\%/%%}}]%f }'"$PROMPT"

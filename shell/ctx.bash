@@ -69,5 +69,6 @@ else
   fi
 fi
 
-# Show the active context (and short Azure subscription label) in the prompt.
-PS1='${CLOUDCTX_CONTEXT:+\[\e[36m\][${CLOUDCTX_CONTEXT}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL}}]\[\e[0m\] }'"$PS1"
+# Show the active context (+ short Azure subscription label + AWS_PROFILE) in
+# the prompt. AWS_PROFILE is the only cloud indicator for an AWS-only context.
+PS1='${CLOUDCTX_CONTEXT:+\[\e[36m\][${CLOUDCTX_CONTEXT}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL}}${AWS_PROFILE:+ aws:${AWS_PROFILE}}]\[\e[0m\] }'"$PS1"

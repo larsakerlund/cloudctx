@@ -158,8 +158,10 @@ def _parse_toml(text: str) -> dict:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if line.startswith("[") and line.endswith("]"):
-            table = line[1:-1].strip()
+        if line.startswith("[") and "]" in line:
+            # trim at the closing bracket so a hand-edited `[name]  # comment`
+            # header parses the same way tomllib does, instead of being dropped.
+            table = line[1:line.index("]")].strip()
             result.setdefault(table, {})
             continue
         if "=" not in line or table is None:

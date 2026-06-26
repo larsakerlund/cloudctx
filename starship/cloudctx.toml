@@ -12,8 +12,17 @@ symbol = '☁ '
 format = 'on [$symbol$env_value]($style) '
 style = 'bold cyan'
 
+# AWS_PROFILE — the only cloud indicator for an AWS-only context (spec §7.2).
+# Shown only when set, so Azure-only contexts stay uncluttered.
+[env_var.AWS_PROFILE]
+variable = 'AWS_PROFILE'
+default = ''
+symbol = 'aws:'
+format = '[$symbol$env_value]($style) '
+style = 'bold yellow'
+
 # env_var modules are NOT in Starship's default prompt order, so you must place
-# it explicitly in your top-level `format`. The dotted module name requires the
+# them explicitly in your top-level `format`. The dotted module name requires the
 # ${...} form. Example (adjust to your existing format):
 #
-#   format = '$all${env_var.CLOUDCTX_CONTEXT}$character'
+#   format = '$all${env_var.CLOUDCTX_CONTEXT}${env_var.AWS_PROFILE}$character'

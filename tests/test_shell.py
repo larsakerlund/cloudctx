@@ -109,6 +109,14 @@ class TestShimZsh(unittest.TestCase):
         r = self.run_script(f'{echo} "{MARK}${self.pvar}"')
         self.assertIn("CLOUDCTX_CONTEXT", extract(r.stdout) or "", msg=r.stderr)
 
+    def test_prompt_includes_aws_profile(self):
+        # Spec §7.2: the prompt segment surfaces AWS_PROFILE — the only cloud
+        # indicator for an AWS-only context. Assert the prompt string references
+        # it (conditionally, so it shows only when a context is active).
+        echo = "print -r --" if self.shell == "zsh" else "echo"
+        r = self.run_script(f'{echo} "{MARK}${self.pvar}"')
+        self.assertIn("AWS_PROFILE", extract(r.stdout) or "", msg=r.stderr)
+
     # --- review regression tests ---
     def _new(self, *args):
         subprocess.run([str(ROOT / "cloudctx"), "new", *args, "--no-login"],
