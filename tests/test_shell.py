@@ -172,26 +172,32 @@ class TestShimZsh(unittest.TestCase):
         ''')
         self.assertEqual(extract(r.stdout), "yes|100%n", msg=r.stderr)
 
-    def test_bash_debug_trap_chains(self):
-        # Finding #8: sourcing the shim must not clobber a pre-existing DEBUG trap.
-        # Check the prior handler still fires for a command issued AFTER sourcing
-        # (a marker file, cleared post-source, isolates that from source-time fires).
+    def test_bash_guard_composes_with_bash_preexec(self):
+        # Finding #8 (coexistence): when bash-preexec is present, register as a
+        # preexec function and DON'T seize the DEBUG trap, so other hooks survive.
         if self.shell != "bash":
-            self.skipTest("bash-specific DEBUG trap chaining")
+            self.skipTest("bash-specific guard registration")
         script = (
-            'M=$(mktemp)\n'
-            "trap 'echo X >> \"$M\"' DEBUG\n"
+            "preexec_functions=()\n"           # simulate bash-preexec being loaded
+            "trap 'echo PRIOR' DEBUG\n"        # a pre-existing DEBUG trap
             f"source {ROOT}/shell/ctx.bash\n"
-            ': > "$M"\n'        # clear fires that happened during sourcing
-            'true\n'            # post-source command must re-trigger the prior trap
-            'n=$(wc -l < "$M"); rm -f "$M"\n'
-            'echo "CCTX=$n"\n'
+            'echo "CCTX=$(declare -p preexec_functions)|$(trap -p DEBUG)"\n'
         )
         r = subprocess.run([self.shell, "--norc", "--noprofile", "-c", script],
                            env=self.env, capture_output=True, text=True)
-        n = extract(r.stdout)
-        self.assertTrue(n and int(n.strip()) > 0,
-                        msg=f"prior DEBUG trap was clobbered (n={n}) {r.stderr}")
+        val = extract(r.stdout) or ""
+        self.assertIn("_cctx_bp_preexec", val, msg=r.stderr)   # we registered
+        self.assertIn("echo PRIOR", val, msg="our shim clobbered the DEBUG trap")
+
+    def test_bash_guard_installs_trap_without_preexec(self):
+        # Finding #8 (fallback): on plain bash the guard still installs.
+        if self.shell != "bash":
+            self.skipTest("bash-specific guard registration")
+        script = (f"source {ROOT}/shell/ctx.bash\n"
+                  'echo "CCTX=$(trap -p DEBUG)"\n')
+        r = subprocess.run([self.shell, "--norc", "--noprofile", "-c", script],
+                           env=self.env, capture_output=True, text=True)
+        self.assertIn("cloudctx_debug", extract(r.stdout) or "", msg=r.stderr)
 
 
 @unittest.skipUnless(shutil.which("bash"), "bash not installed")

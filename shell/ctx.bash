@@ -49,24 +49,20 @@ _cctx_guard() {
 
 cloudctx_debug() { _cctx_guard "$BASH_COMMAND"; }
 
-# Bash has no native preexec. Prefer rcaloras/bash-preexec if it's installed
-# (compose cleanly); otherwise chain onto any existing DEBUG trap instead of
-# clobbering it (starship/atuin/direnv often install one). The DEBUG trap fires
-# per simple command, so we inspect only the first word -> at most one warning.
-if [ -n "${preexec_functions+x}" ]; then
+# Bash has no native preexec. If rcaloras/bash-preexec is loaded, register as a
+# preexec function so we compose with every other hook (starship/atuin/direnv,
+# which use bash-preexec) — this is the supported way to coexist.
+#
+# Otherwise install our own DEBUG trap. We deliberately do NOT try to "chain"
+# onto a pre-existing DEBUG trap: `trap -p DEBUG` returns nothing from inside a
+# sourced file's scope, so the previous handler is invisible here and any chain
+# would be a no-op that still clobbers it. If you use other DEBUG-trap tools,
+# load bash-preexec (then we take the preexec path above and nothing is lost).
+if declare -p preexec_functions >/dev/null 2>&1; then
   _cctx_bp_preexec() { _cctx_guard "$1"; }
   preexec_functions+=(_cctx_bp_preexec)
 else
-  __cctx_prev_debug="$(trap -p DEBUG)"
-  if [ -n "$__cctx_prev_debug" ]; then
-    __cctx_prev_debug="${__cctx_prev_debug#trap -- }"   # strip prefix
-    __cctx_prev_debug="${__cctx_prev_debug% DEBUG}"      # strip suffix
-    __cctx_prev_debug="${__cctx_prev_debug#\'}"          # strip outer quotes
-    __cctx_prev_debug="${__cctx_prev_debug%\'}"
-    trap "${__cctx_prev_debug}; cloudctx_debug" DEBUG
-  else
-    trap 'cloudctx_debug' DEBUG
-  fi
+  trap 'cloudctx_debug' DEBUG
 fi
 
 # Show the active context (+ short Azure subscription label + AWS_PROFILE) in
