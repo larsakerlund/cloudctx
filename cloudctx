@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""cloudctx — per-window Azure/AWS CLI context isolation.
+
+A single, zero-dependency CLI. The sourced `ctx` shell shim eval's the output
+of `cloudctx _env <name>` to mutate the parent shell, and runs
+`cloudctx _decorate <name>` for iTerm2 visuals. Everything else runs here.
+
+Sections below: paths, TOML registry, color helpers, env emission,
+decorate emission, commands, argparse dispatch.
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+
+# --------------------------------------------------------------------------
+# Paths
+# --------------------------------------------------------------------------
+def REGISTRY_ROOT() -> Path:
+    """Root of the context store. Overridable via $CLOUDCTX_HOME (for tests)."""
+    return Path(os.environ.get("CLOUDCTX_HOME", str(Path.home() / ".cloudctx")))
+
+
+def registry_path() -> Path:
+    return REGISTRY_ROOT() / "contexts.toml"
+
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+def cmd_list(args) -> int:
+    registry = load_registry()
+    if not registry:
+        print("no contexts. Create one with: ctx new <name>")
+        return 0
+    active = os.environ.get("CLOUDCTX_CONTEXT")
+    for name in sorted(registry):
+        mark = "*" if name == active else " "
+        print(f"{mark} {name}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Registry (TOML) — implemented in Task 2; minimal stub for Task 1.
+# --------------------------------------------------------------------------
+def load_registry() -> dict:
+    return {}
+
+
+# --------------------------------------------------------------------------
+# Dispatch
+# --------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="cloudctx", description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="command", required=True)
+
+    p_list = sub.add_parser("list", help="list contexts; mark the active one")
+    p_list.set_defaults(func=cmd_list)
+
+    return p
+
+
+def main(argv) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
