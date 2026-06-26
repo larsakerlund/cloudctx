@@ -95,7 +95,9 @@ def cmd_new(args) -> int:
     print(f"created context {name!r} at {context_dir(name)}")
 
     if not args.no_login:
-        print(f"next: authenticate with  ctx login {name}")
+        return cmd_login(argparse.Namespace(
+            name=name, dry_run=False, device_code=getattr(args, "device_code", False)))
+    print(f"next: authenticate with  ctx login {name}")
     return 0
 
 
@@ -321,6 +323,57 @@ def cmd_decorate(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# Auth. v1 automates Azure only; AWS prints a guided stub (the per-context
+# store and env exports already exist, so AWS becomes functional once the AWS
+# CLI is installed and a login populates the files).
+# --------------------------------------------------------------------------
+AWS_STUB = (
+    "AWS auth is not yet automated in this version. Once the AWS CLI is "
+    "installed, point AWS_CONFIG_FILE at {cfg} and run `aws sso login`, or write "
+    "static keys into {cred}. See the README for details."
+)
+
+
+def azure_login_cmds(entry, device_code=False):
+    login = ["az", "login"]
+    if entry.get("azure_tenant"):
+        login += ["--tenant", entry["azure_tenant"]]
+    if device_code:
+        login += ["--use-device-code"]
+    cmds = [login]
+    if entry.get("azure_subscription"):
+        cmds.append(["az", "account", "set", "--subscription", entry["azure_subscription"]])
+    return cmds
+
+
+def cmd_login(args) -> int:
+    name = args.name
+    registry = load_registry()
+    if name not in registry:
+        return die(f"unknown context {name!r}")
+    entry = registry[name]
+    has_azure = any(entry.get(f) for f in AZURE_FIELDS)
+    has_aws = any(entry.get(f) for f in AWS_FIELDS)
+    do_azure = has_azure or not has_aws  # azure by default unless aws-only
+
+    env = dict(os.environ)
+    azconf = str(azure_dir(name).resolve())
+    env["AZURE_CONFIG_DIR"] = azconf  # isolate tokens into the context store
+
+    if do_azure:
+        for vec in azure_login_cmds(entry, device_code=getattr(args, "device_code", False)):
+            if getattr(args, "dry_run", False):
+                print(f"AZURE_CONFIG_DIR={azconf} " + " ".join(vec))
+            else:
+                print("+ " + " ".join(vec))
+                if subprocess.run(vec, env=env).returncode != 0:
+                    return die(f"`{' '.join(vec)}` failed")
+    if has_aws:
+        print(AWS_STUB.format(cfg=aws_config(name), cred=aws_credentials(name)))
+    return 0
+
+
+# --------------------------------------------------------------------------
 # exec + status
 # --------------------------------------------------------------------------
 def cmd_exec(args) -> int:
@@ -396,6 +449,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--aws-account-id", dest="aws_account_id")
     p_new.add_argument("--aws-role", dest="aws_role")
     p_new.add_argument("--aws-profile", dest="aws_profile")
+    p_new.add_argument("--device-code", action="store_true",
+                       help="use Azure device-code login flow (headless)")
     p_new.add_argument("--no-login", action="store_true",
                        help="scaffold only; skip first-time authentication")
     p_new.set_defaults(func=cmd_new)
@@ -420,6 +475,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", aliases=["whoami"],
                               help="show the real identity for this shell")
     p_status.set_defaults(func=cmd_status)
+
+    p_login = sub.add_parser("login", help="(re)authenticate a context into its store")
+    p_login.add_argument("name")
+    p_login.add_argument("--device-code", action="store_true",
+                         help="use Azure device-code login flow (headless)")
+    p_login.add_argument("--dry-run", action="store_true",
+                         help="print the auth commands instead of running them")
+    p_login.set_defaults(func=cmd_login)
 
     return p
 

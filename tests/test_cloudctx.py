@@ -265,5 +265,34 @@ class TestExecStatus(Base):
         self.assertIn("me@example.com", r.stdout)
 
 
+class TestLogin(Base):
+    def test_azure_login_cmds(self):
+        entry = {"azure_tenant": "t", "azure_subscription": "s"}
+        self.assertEqual(
+            self.cc.azure_login_cmds(entry),
+            [["az", "login", "--tenant", "t"],
+             ["az", "account", "set", "--subscription", "s"]],
+        )
+
+    def test_azure_login_cmds_device_code(self):
+        entry = {"azure_tenant": "t"}
+        cmds = self.cc.azure_login_cmds(entry, device_code=True)
+        self.assertEqual(cmds[0], ["az", "login", "--tenant", "t", "--use-device-code"])
+
+    def test_login_dry_run_shows_commands_and_aws_stub(self):
+        self.run_cli("new", "acme", "--azure-tenant", "t",
+                     "--azure-subscription", "s", "--aws-profile", "acme", "--no-login")
+        code, out = self.run_cli("login", "acme", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("az login --tenant t", out)
+        self.assertIn("az account set --subscription s", out)
+        self.assertIn(str(self.cc.azure_dir("acme").resolve()), out)
+        self.assertIn("not yet", out.lower())  # AWS stub
+
+    def test_login_unknown_context(self):
+        code, out = self.run_cli("login", "ghost", "--dry-run")
+        self.assertNotEqual(code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
