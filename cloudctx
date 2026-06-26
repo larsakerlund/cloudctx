@@ -1,0 +1,730 @@
+#!/usr/bin/env python3
+"""cloudctx — per-window Azure/AWS CLI context isolation.
+
+A single, zero-dependency CLI. The sourced `ctx` shell shim eval's the output
+of `cloudctx _env <name>` to mutate the parent shell, and runs
+`cloudctx _decorate <name>` for iTerm2 visuals. Everything else runs here.
+
+Sections below: paths, TOML registry, color helpers, env emission,
+decorate emission, commands, argparse dispatch.
+"""
+import argparse
+import base64
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ESC = "\x1b"
+BEL = "\x07"
+
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Optional fields accepted by `new`, mapped to their registry keys.
+AZURE_FIELDS = ["azure_tenant", "azure_subscription"]
+AWS_FIELDS = ["aws_sso_start_url", "aws_sso_region", "aws_account_id",
+              "aws_role", "aws_profile"]
+
+
+# --------------------------------------------------------------------------
+# Paths
+# --------------------------------------------------------------------------
+def REGISTRY_ROOT() -> Path:
+    """Root of the context store. Overridable via $CLOUDCTX_HOME (for tests)."""
+    return Path(os.environ.get("CLOUDCTX_HOME", str(Path.home() / ".cloudctx")))
+
+
+def registry_path() -> Path:
+    return REGISTRY_ROOT() / "contexts.toml"
+
+
+def context_dir(name: str) -> Path:
+    # Defense in depth: never turn an unsafe name into a path component.
+    if not NAME_RE.match(name):
+        raise ValueError(f"unsafe context name {name!r}")
+    return REGISTRY_ROOT() / name
+
+
+def azure_dir(name: str) -> Path:
+    return context_dir(name) / "azure"
+
+
+def aws_config(name: str) -> Path:
+    return context_dir(name) / "aws" / "config"
+
+
+def aws_credentials(name: str) -> Path:
+    return context_dir(name) / "aws" / "credentials"
+
+
+def die(msg: str) -> int:
+    print(f"cloudctx: error: {msg}", file=sys.stderr)
+    return 1
+
+
+def _chmod(path, mode) -> None:
+    """chmod that warns rather than silently swallowing failure — these modes
+    protect a credential store, so a silent miss must not go unnoticed."""
+    try:
+        os.chmod(path, mode)
+    except OSError as e:
+        print(f"cloudctx: warning: could not set {oct(mode)} on {path}: {e}",
+              file=sys.stderr)
+
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+def cmd_new(args) -> int:
+    name = args.name
+    if not NAME_RE.match(name):
+        return die(f"invalid context name {name!r} (use letters, digits, '-', '_')")
+    registry = load_registry()
+    if name in registry:
+        return die(f"context {name!r} already exists")
+    if args.color:
+        try:
+            hex_to_rgb255(args.color)
+        except ValueError:
+            return die(f"invalid color {args.color!r} (use #rgb or #rrggbb)")
+
+    azure_dir(name).mkdir(parents=True, exist_ok=True)
+    (context_dir(name) / "aws").mkdir(parents=True, exist_ok=True)
+    # Lock down the whole per-context credential store (tokens land here).
+    for d in (context_dir(name), azure_dir(name), context_dir(name) / "aws"):
+        _chmod(d, 0o700)
+
+    entry = {}
+    if args.display:
+        entry["display"] = args.display
+    if args.color:
+        entry["color"] = args.color
+    for field in AZURE_FIELDS + AWS_FIELDS:
+        value = getattr(args, field, None)
+        if value:
+            entry[field] = value
+    entry.setdefault("display", name)
+    registry[name] = entry
+    save_registry(registry)
+    print(f"created context {name!r} at {context_dir(name)}")
+
+    if not getattr(args, "no_profiles", False):
+        try:
+            write_profiles()
+        except OSError:
+            pass  # e.g. no iTerm2 dir on a non-mac box; not fatal
+
+    if not args.no_login:
+        return cmd_login(argparse.Namespace(
+            name=name, dry_run=False, device_code=getattr(args, "device_code", False)))
+    print(f"next: authenticate with  ctx login {name}")
+    return 0
+
+
+def cmd_list(args) -> int:
+    registry = load_registry()
+    if not registry:
+        print("no contexts. Create one with: ctx new <name>")
+        return 0
+    active = os.environ.get("CLOUDCTX_CONTEXT")
+    for name in sorted(registry):
+        mark = "*" if name == active else " "
+        print(f"{mark} {name}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Registry (TOML)
+#
+# tomllib is 3.11+ and read-only; on the 3.9 build machine it is absent, so we
+# fall back to a tiny parser for our restricted schema (flat [name] tables with
+# key = "value" string pairs). There is no stdlib TOML *writer* on any version,
+# so _dump_toml is always hand-rolled.
+# --------------------------------------------------------------------------
+try:
+    import tomllib as _tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    _tomllib = None
+
+
+def _parse_toml(text: str) -> dict:
+    """Minimal TOML reader for our schema: [table] headers and key = "string"."""
+    result: dict = {}
+    table = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and "]" in line:
+            # trim at the closing bracket so a hand-edited `[name]  # comment`
+            # header parses the same way tomllib does, instead of being dropped.
+            table = line[1:line.index("]")].strip()
+            result.setdefault(table, {})
+            continue
+        if "=" not in line or table is None:
+            continue
+        key, _, rhs = line.partition("=")
+        result[table][key.strip()] = _parse_value(rhs.strip())
+    return result
+
+
+def _parse_value(rhs: str) -> str:
+    """Parse the right-hand side of `key = value`. Quoted strings honor \\" and
+    \\\\ escapes; a trailing ` # comment` outside the quotes is ignored."""
+    if rhs.startswith('"'):
+        out = []
+        i = 1
+        while i < len(rhs):
+            ch = rhs[i]
+            if ch == "\\" and i + 1 < len(rhs):
+                nxt = rhs[i + 1]
+                out.append({'"': '"', "\\": "\\", "n": "\n", "t": "\t",
+                            "r": "\r"}.get(nxt, nxt))
+                i += 2
+                continue
+            if ch == '"':
+                break
+            out.append(ch)
+            i += 1
+        return "".join(out)
+    # bare value (lenient): strip an inline comment
+    return rhs.split("#", 1)[0].strip().strip('"')
+
+
+def _escape(value: str) -> str:
+    # Must encode control chars too: a raw newline produces invalid TOML that
+    # tomllib (3.11+) rejects outright and the 3.9 fallback silently truncates.
+    return (value.replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r"))
+
+
+def _dump_toml(data: dict) -> str:
+    chunks = []
+    for name in sorted(data):
+        chunks.append(f"[{name}]")
+        for key in data[name]:
+            chunks.append(f'{key} = "{_escape(str(data[name][key]))}"')
+        chunks.append("")  # blank line between tables
+    return "\n".join(chunks).rstrip("\n") + "\n"
+
+
+def load_registry() -> dict:
+    path = registry_path()
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    data = _tomllib.loads(text) if _tomllib is not None else _parse_toml(text)
+    # The registry is untrusted input (it may be hand-edited or synced). Drop any
+    # table whose name isn't a safe context name, so a crafted key like
+    # `[../../evil]` can never be resolved into a path outside the store.
+    clean = {}
+    for key, value in data.items():
+        if NAME_RE.match(key):
+            clean[key] = value
+        else:
+            print(f"cloudctx: warning: ignoring invalid context name {key!r} "
+                  f"in {path}", file=sys.stderr)
+    return clean
+
+
+def save_registry(data: dict) -> None:
+    root = REGISTRY_ROOT()
+    root.mkdir(parents=True, exist_ok=True)
+    _chmod(root, 0o700)  # registry root holds credential stores: owner-only
+    path = registry_path()
+    tmp = path.with_suffix(".toml.tmp")
+    tmp.write_text(_dump_toml(data), encoding="utf-8")
+    _chmod(tmp, 0o600)   # contexts.toml holds tenant/account identifiers
+    os.replace(tmp, path)  # atomic on POSIX
+
+
+# --------------------------------------------------------------------------
+# Env emission — the isolation core. `_env` prints shell statements that the
+# sourced `ctx` shim eval's into the parent shell. Values are single-quote
+# escaped because the registry is untrusted input to that eval.
+# --------------------------------------------------------------------------
+CLEARABLE_VARS = [
+    "CLOUDCTX_CONTEXT", "CLOUDCTX_AZURE_LABEL", "AZURE_CONFIG_DIR",
+    "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_PROFILE",
+]
+
+
+def shquote(s: str) -> str:
+    """POSIX-safe single-quoting: wrap in '...' and escape embedded ' as '\\''."""
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def env_dict(name: str) -> dict:
+    """The environment a context exports, as a plain dict (shared by _env and exec)."""
+    entry = load_registry()[name]
+    env = {
+        "CLOUDCTX_CONTEXT": name,
+        # Always redirect Azure to the isolated store — even an AWS-only context
+        # should never fall back to the global ~/.azure.
+        "AZURE_CONFIG_DIR": str(azure_dir(name).resolve()),
+    }
+    if entry.get("azure_subscription"):
+        env["CLOUDCTX_AZURE_LABEL"] = entry["azure_subscription"]
+    # AWS vars only when the context actually defines AWS fields (v1 = opt-in).
+    if any(entry.get(f) for f in AWS_FIELDS):
+        env["AWS_CONFIG_FILE"] = str(aws_config(name).resolve())
+        env["AWS_SHARED_CREDENTIALS_FILE"] = str(aws_credentials(name).resolve())
+        env["AWS_PROFILE"] = entry.get("aws_profile") or name
+    return env
+
+
+def env_lines(name: str) -> list:
+    env = env_dict(name)
+    lines = [f"export {k}={shquote(v)}" for k, v in env.items()]
+    # Explicitly unset every managed var this context does NOT set, so a single
+    # eval fully *replaces* the previous context (no stale AWS_*/label bleed).
+    lines += [f"unset {var}" for var in CLEARABLE_VARS if var not in env]
+    return lines
+
+
+def cmd_env(args) -> int:
+    if args.clear:
+        print("\n".join(f"unset {var}" for var in CLEARABLE_VARS))
+        return 0
+    if not args.name:
+        return die("usage: cloudctx _env <name> | --clear")
+    if args.name not in load_registry():
+        return die(f"unknown context {args.name!r}")
+    print("\n".join(env_lines(args.name)))
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Color helpers. A single `color = "#rrggbb"` registry field feeds two distinct
+# encodings: packed hex for the iTerm2 SetColors escape code (here), and
+# float components 0.0-1.0 for Dynamic Profiles JSON (build_profiles, later).
+# --------------------------------------------------------------------------
+def hex_to_rgb255(color: str):
+    c = color.lstrip("#").strip()
+    if len(c) == 3:
+        c = "".join(ch * 2 for ch in c)
+    if len(c) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in c):
+        raise ValueError(f"bad color {color!r}")
+    return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+
+
+def rgb_floats(color: str):
+    r, g, b = hex_to_rgb255(color)
+    return r / 255, g / 255, b / 255
+
+
+def _hex6(color: str) -> str:
+    r, g, b = hex_to_rgb255(color)
+    return f"{r:02x}{g:02x}{b:02x}"
+
+
+# --------------------------------------------------------------------------
+# Decorate emission — raw iTerm2 escape sequences. `ctx use` runs this WITHOUT
+# command substitution so the bytes reach the controlling tty and render.
+# Verified sequences: badge needs base64; tab color is packed hex (no '#').
+# --------------------------------------------------------------------------
+def _badge_seq(text: str) -> str:
+    b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return f"{ESC}]1337;SetBadgeFormat={b64}{BEL}"
+
+
+def _strip_controls(text: str) -> str:
+    # Drop C0 (<0x20), DEL (0x7f) and C1 (0x80-0x9f) controls so a crafted
+    # display can't terminate the OSC early or start an 8-bit control sequence
+    # (the badge is base64-encoded, so it's already safe).
+    return "".join(ch for ch in text
+                   if ord(ch) >= 0x20 and not (0x7f <= ord(ch) <= 0x9f))
+
+
+def _title_seq(text: str) -> str:
+    return f"{ESC}]0;{_strip_controls(text)}{BEL}"  # OSC 0 sets tab+window title
+
+
+def _tabcolor_seq(hex6: str) -> str:
+    return f"{ESC}]1337;SetColors=tab={hex6}{BEL}"
+
+
+def decorate_bytes(name: str) -> str:
+    entry = load_registry()[name]
+    display = entry.get("display") or name
+    out = _badge_seq(display) + _title_seq(display)
+    color = entry.get("color")
+    if color:
+        try:
+            out += _tabcolor_seq(_hex6(color))
+        except ValueError:
+            pass  # malformed color: skip the tab-color sequence, don't crash
+    return out
+
+
+def decorate_clear() -> str:
+    return (f"{ESC}]1337;SetBadgeFormat={BEL}"          # empty badge payload
+            f"{ESC}]1337;SetColors=tab=default{BEL}")    # documented reset
+
+
+def cmd_decorate(args) -> int:
+    if args.clear:
+        sys.stdout.write(decorate_clear())
+        return 0
+    if not args.name:
+        return die("usage: cloudctx _decorate <name> | --clear")
+    if args.name not in load_registry():
+        return die(f"unknown context {args.name!r}")
+    sys.stdout.write(decorate_bytes(args.name))
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Auth. v1 automates Azure only; AWS prints a guided stub (the per-context
+# store and env exports already exist, so AWS becomes functional once the AWS
+# CLI is installed and a login populates the files).
+# --------------------------------------------------------------------------
+AWS_STUB = (
+    "AWS auth is not yet automated in this version. Once the AWS CLI is "
+    "installed, point AWS_CONFIG_FILE at {cfg} and run `aws sso login`, or write "
+    "static keys into {cred}. See the README for details."
+)
+
+
+def azure_login_cmds(entry, device_code=False):
+    login = ["az", "login"]
+    if entry.get("azure_tenant"):
+        login += ["--tenant", entry["azure_tenant"]]
+    if device_code:
+        login += ["--use-device-code"]
+    cmds = [login]
+    if entry.get("azure_subscription"):
+        cmds.append(["az", "account", "set", "--subscription", entry["azure_subscription"]])
+    return cmds
+
+
+def cmd_login(args) -> int:
+    name = args.name
+    registry = load_registry()
+    if name not in registry:
+        return die(f"unknown context {name!r}")
+    entry = registry[name]
+    has_azure = any(entry.get(f) for f in AZURE_FIELDS)
+    has_aws = any(entry.get(f) for f in AWS_FIELDS)
+    do_azure = has_azure or not has_aws  # azure by default unless aws-only
+
+    env = dict(os.environ)
+    azconf = str(azure_dir(name).resolve())
+    env["AZURE_CONFIG_DIR"] = azconf  # isolate tokens into the context store
+
+    if do_azure:
+        for vec in azure_login_cmds(entry, device_code=getattr(args, "device_code", False)):
+            if getattr(args, "dry_run", False):
+                print(f"AZURE_CONFIG_DIR={azconf} " + " ".join(vec))
+            else:
+                print("+ " + " ".join(vec))
+                if subprocess.run(vec, env=env).returncode != 0:
+                    return die(f"`{' '.join(vec)}` failed")
+    if has_aws:
+        print(AWS_STUB.format(cfg=aws_config(name), cred=aws_credentials(name)))
+    return 0
+
+
+# --------------------------------------------------------------------------
+# exec + status
+# --------------------------------------------------------------------------
+def cmd_exec(args) -> int:
+    name = args.name
+    if name not in load_registry():
+        return die(f"unknown context {name!r}")
+    cmd = list(args.cmd or [])
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        return die("usage: ctx exec <name> -- <command> [args...]")
+    # Strip any managed vars inherited from the caller's shell before overlaying
+    # this context's, so exec is fail-closed (no other context's AWS_* leaks in).
+    env = {k: v for k, v in os.environ.items() if k not in CLEARABLE_VARS}
+    env.update(env_dict(name))
+    try:
+        return subprocess.run(cmd, env=env).returncode
+    except FileNotFoundError:
+        return die(f"command not found: {cmd[0]}")
+
+
+def cmd_status(args) -> int:
+    print(f"context: {os.environ.get('CLOUDCTX_CONTEXT', '(none)')}")
+
+    if shutil.which("az"):
+        r = subprocess.run(["az", "account", "show", "-o", "json"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            try:
+                d = json.loads(r.stdout)
+                user = (d.get("user") or {}).get("name")
+                print(f"azure:   {d.get('name')} ({d.get('id')})  "
+                      f"tenant={d.get('tenantId')}  user={user}")
+            except (ValueError, AttributeError):
+                print("azure:   (could not parse `az account show`)")
+        else:
+            print("azure:   not logged in (run: ctx login <name>)")
+    else:
+        print("azure:   az CLI not installed")
+
+    if shutil.which("aws"):
+        r = subprocess.run(["aws", "sts", "get-caller-identity", "--output", "json"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            try:
+                d = json.loads(r.stdout)
+                print(f"aws:     account={d.get('Account')}  arn={d.get('Arn')}")
+            except (ValueError, AttributeError):
+                print("aws:     (could not parse caller identity)")
+        else:
+            print("aws:     not authenticated")
+    else:
+        print("aws:     not configured (aws CLI not installed)")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Windowing — open a new iTerm2 window/tab already scoped to a context.
+# iTerm2's AppleScript is frozen but stable; we drive it via osascript argv
+# (no shell), escaping only the AppleScript string literal.
+# --------------------------------------------------------------------------
+def applescript_escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def build_open_command(name: str, cd=None, claude=False) -> str:
+    parts = [f"ctx use {name}"]
+    if cd:
+        parts.append(f"cd {shquote(cd)}")
+    if claude:
+        parts.append("claude")
+    return " && ".join(parts)
+
+
+def open_osascript_argv(command: str, tab=False):
+    esc = applescript_escape(command)
+    if tab:
+        body = [
+            'tell application "iTerm2"',
+            'tell current window',
+            'set _t to (create tab with default profile)',
+            'end tell',
+            'tell current session of current window',
+            f'write text "{esc}"',
+            'end tell',
+            'end tell',
+        ]
+    else:
+        body = [
+            'tell application "iTerm2"',
+            'set _w to (create window with default profile)',
+            'tell current session of _w',
+            f'write text "{esc}"',
+            'end tell',
+            'end tell',
+        ]
+    argv = ["osascript"]
+    for line in body:
+        argv += ["-e", line]
+    return argv
+
+
+def cmd_open(args) -> int:
+    if args.name not in load_registry():
+        return die(f"unknown context {args.name!r}")
+    command = build_open_command(args.name, cd=getattr(args, "cd", None),
+                                 claude=getattr(args, "claude", False))
+    argv = open_osascript_argv(command, tab=getattr(args, "tab", False))
+    if getattr(args, "dry_run", False):
+        print("\n".join(argv))
+        return 0
+    if not shutil.which("osascript"):
+        return die("osascript not found — `ctx open` needs macOS + iTerm2")
+    return subprocess.run(argv).returncode
+
+
+def cmd_claude(args) -> int:
+    return cmd_open(argparse.Namespace(
+        name=args.name, cd=args.path, claude=True,
+        tab=getattr(args, "tab", False), dry_run=getattr(args, "dry_run", False)))
+
+
+# --------------------------------------------------------------------------
+# iTerm2 Dynamic Profiles — one profile per context in the profile menu. Uses
+# "Initial Text" (keeps an interactive shell, unlike "Custom Command"), a stable
+# Guid, and the Tab Color object whose components are floats 0.0-1.0.
+# --------------------------------------------------------------------------
+def profiles_path() -> Path:
+    override = os.environ.get("CLOUDCTX_PROFILES")
+    if override:
+        return Path(override)
+    return (Path.home() / "Library" / "Application Support" / "iTerm2"
+            / "DynamicProfiles" / "cloudctx.json")
+
+
+def build_profiles(registry: dict) -> dict:
+    profiles = []
+    for name in sorted(registry):
+        entry = registry[name]
+        display = entry.get("display") or name
+        prof = {
+            "Name": f"{display} (ctx)",
+            "Guid": f"cloudctx-{name}",  # stable across regenerations
+            "Initial Text": f"ctx use {name}",
+            "Custom Command": "No",
+            "Command": "",
+        }
+        color = entry.get("color")
+        if color:
+            try:
+                r, g, b = rgb_floats(color)
+                prof["Use Tab Color"] = True
+                prof["Tab Color"] = {
+                    "Red Component": r, "Green Component": g, "Blue Component": b,
+                    "Alpha Component": 1, "Color Space": "sRGB",
+                }
+            except ValueError:
+                pass  # malformed color: skip tab color, keep the profile
+        profiles.append(prof)
+    return {"Profiles": profiles}
+
+
+def write_profiles() -> Path:
+    path = profiles_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(build_profiles(load_registry()), indent=2),
+                    encoding="utf-8")
+    return path
+
+
+def cmd_gen_profiles(args) -> int:
+    path = write_profiles()
+    n = len(build_profiles(load_registry())["Profiles"])
+    print(f"wrote {n} profile(s) to {path}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# install — print (or write) the shell-rc line that sources the shim.
+# --------------------------------------------------------------------------
+def script_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def cmd_install(args) -> int:
+    requested = args.shell or os.path.basename(os.environ.get("SHELL", "zsh"))
+    shell = "bash" if "bash" in requested else "zsh"
+    shim = script_dir() / "shell" / f"ctx.{shell}"
+    rc = Path.home() / (".bashrc" if shell == "bash" else ".zshrc")
+    line = f"source {shim}"
+    if args.write:
+        with open(rc, "a", encoding="utf-8") as f:
+            f.write(f"\n# cloudctx\n{line}\n")
+        print(f"appended to {rc}:\n  {line}\nOpen a new shell to activate.")
+    else:
+        print(f"# add to {rc}:")
+        print(line)
+        print(f"# and make sure `cloudctx` is on PATH (it lives at {script_dir() / 'cloudctx'})")
+        print("# re-run with --write to append the source line automatically.")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Dispatch
+# --------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="cloudctx", description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="command", required=True)
+
+    p_list = sub.add_parser("list", help="list contexts; mark the active one")
+    p_list.set_defaults(func=cmd_list)
+
+    p_new = sub.add_parser("new", help="scaffold a context + registry entry")
+    p_new.add_argument("name")
+    p_new.add_argument("--display", help="human-readable label")
+    p_new.add_argument("--color", help="iTerm2 tab/badge color, e.g. #c0392b")
+    p_new.add_argument("--azure-tenant", dest="azure_tenant")
+    p_new.add_argument("--azure-subscription", dest="azure_subscription")
+    p_new.add_argument("--aws-sso-start-url", dest="aws_sso_start_url")
+    p_new.add_argument("--aws-sso-region", dest="aws_sso_region")
+    p_new.add_argument("--aws-account-id", dest="aws_account_id")
+    p_new.add_argument("--aws-role", dest="aws_role")
+    p_new.add_argument("--aws-profile", dest="aws_profile")
+    p_new.add_argument("--device-code", action="store_true",
+                       help="use Azure device-code login flow (headless)")
+    p_new.add_argument("--no-login", action="store_true",
+                       help="scaffold only; skip first-time authentication")
+    p_new.add_argument("--no-profiles", action="store_true",
+                       help="don't regenerate the iTerm2 dynamic profiles")
+    p_new.set_defaults(func=cmd_new)
+
+    # Internal: consumed by the sourced shell shim, not meant for direct use.
+    p_env = sub.add_parser("_env", help="(internal) emit shell export/unset lines")
+    p_env.add_argument("name", nargs="?")
+    p_env.add_argument("--clear", action="store_true")
+    p_env.set_defaults(func=cmd_env)
+
+    p_dec = sub.add_parser("_decorate", help="(internal) emit iTerm2 escape sequences")
+    p_dec.add_argument("name", nargs="?")
+    p_dec.add_argument("--clear", action="store_true")
+    p_dec.set_defaults(func=cmd_decorate)
+
+    p_exec = sub.add_parser("exec", help="run one command in a context (shell unchanged)")
+    p_exec.add_argument("name")
+    p_exec.add_argument("cmd", nargs=argparse.REMAINDER,
+                        help="-- <command> [args...]")
+    p_exec.set_defaults(func=cmd_exec)
+
+    p_status = sub.add_parser("status", aliases=["whoami"],
+                              help="show the real identity for this shell")
+    p_status.set_defaults(func=cmd_status)
+
+    p_login = sub.add_parser("login", help="(re)authenticate a context into its store")
+    p_login.add_argument("name")
+    p_login.add_argument("--device-code", action="store_true",
+                         help="use Azure device-code login flow (headless)")
+    p_login.add_argument("--dry-run", action="store_true",
+                         help="print the auth commands instead of running them")
+    p_login.set_defaults(func=cmd_login)
+
+    p_open = sub.add_parser("open", help="open a new iTerm2 window/tab scoped to a context")
+    p_open.add_argument("name")
+    p_open.add_argument("--cd", help="cd to this path in the new session")
+    p_open.add_argument("--tab", action="store_true", help="new tab instead of window")
+    p_open.add_argument("--claude", action="store_true", help="also run `claude`")
+    p_open.add_argument("--dry-run", action="store_true",
+                        help="print the osascript argv instead of running it")
+    p_open.set_defaults(func=cmd_open)
+
+    p_claude = sub.add_parser("claude", help="open a scoped window, cd, and run claude")
+    p_claude.add_argument("name")
+    p_claude.add_argument("path", nargs="?", help="project path to cd into")
+    p_claude.add_argument("--tab", action="store_true", help="new tab instead of window")
+    p_claude.add_argument("--dry-run", action="store_true",
+                          help="print the osascript argv instead of running it")
+    p_claude.set_defaults(func=cmd_claude)
+
+    p_gen = sub.add_parser("gen-profiles",
+                           help="regenerate the iTerm2 dynamic profiles file")
+    p_gen.set_defaults(func=cmd_gen_profiles)
+
+    p_install = sub.add_parser("install", help="print/write the shell-rc source line")
+    p_install.add_argument("--shell", choices=["zsh", "bash"],
+                           help="target shell (default: from $SHELL)")
+    p_install.add_argument("--write", action="store_true",
+                           help="append the source line to your rc file")
+    p_install.set_defaults(func=cmd_install)
+
+    return p
+
+
+def main(argv) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

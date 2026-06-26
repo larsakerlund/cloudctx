@@ -1,0 +1,70 @@
+# cloudctx bash shim — source this from ~/.bashrc:
+#     source /path/to/cloudctx/shell/ctx.bash
+#
+# `ctx use`/`ctx clear` must mutate THIS shell, so they run here rather than in
+# the binary (a child process can't export into its parent). Everything else
+# delegates to the `cloudctx` binary.
+
+ctx() {
+  case "$1" in
+    use)
+      if [[ -z "$2" ]]; then echo "usage: ctx use <name>" >&2; return 1; fi
+      local _cctx_env
+      _cctx_env="$(command cloudctx _env "$2")" || return 1
+      eval "$_cctx_env"
+      command cloudctx _decorate "$2"
+      ;;
+    clear)
+      eval "$(command cloudctx _env --clear)"
+      command cloudctx _decorate --clear
+      ;;
+    *)
+      command cloudctx "$@"
+      ;;
+  esac
+}
+
+# --- prompt segment + az/aws guard ----------------------------------------
+# Guard takes a full command line, skips leading VAR=value assignments and
+# common wrappers (sudo/command/env/...), then warns if the real command is
+# az/aws with no context selected. Callable directly; also driven by the trap.
+_cctx_guard() {
+  local -a words
+  read -ra words <<< "$1"
+  local i=0
+  while [ "$i" -lt "${#words[@]}" ]; do
+    case "${words[$i]}" in
+      *=*|sudo|command|env|nice|nohup|time|builtin|exec|stdbuf) i=$((i + 1)) ;;
+      *) break ;;
+    esac
+  done
+  case "${words[$i]:-}" in
+    az|aws)
+      if [ -z "$CLOUDCTX_CONTEXT" ]; then
+        echo "cloudctx: WARNING — '${words[$i]}' run with no context selected (using global default store). Run 'ctx use <name>' first." >&2
+      fi
+      ;;
+  esac
+}
+
+cloudctx_debug() { _cctx_guard "$BASH_COMMAND"; }
+
+# Bash has no native preexec. If rcaloras/bash-preexec is loaded, register as a
+# preexec function so we compose with every other hook (starship/atuin/direnv,
+# which use bash-preexec) — this is the supported way to coexist.
+#
+# Otherwise install our own DEBUG trap. We deliberately do NOT try to "chain"
+# onto a pre-existing DEBUG trap: `trap -p DEBUG` returns nothing from inside a
+# sourced file's scope, so the previous handler is invisible here and any chain
+# would be a no-op that still clobbers it. If you use other DEBUG-trap tools,
+# load bash-preexec (then we take the preexec path above and nothing is lost).
+if declare -p preexec_functions >/dev/null 2>&1; then
+  _cctx_bp_preexec() { _cctx_guard "$1"; }
+  preexec_functions+=(_cctx_bp_preexec)
+else
+  trap 'cloudctx_debug' DEBUG
+fi
+
+# Show the active context (+ short Azure subscription label + AWS_PROFILE) in
+# the prompt. AWS_PROFILE is the only cloud indicator for an AWS-only context.
+PS1='${CLOUDCTX_CONTEXT:+\[\e[36m\][${CLOUDCTX_CONTEXT}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL}}${AWS_PROFILE:+ aws:${AWS_PROFILE}}]\[\e[0m\] }'"$PS1"
