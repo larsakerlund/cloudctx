@@ -10,8 +10,11 @@ decorate emission, commands, argparse dispatch.
 """
 import argparse
 import base64
+import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -318,6 +321,61 @@ def cmd_decorate(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# exec + status
+# --------------------------------------------------------------------------
+def cmd_exec(args) -> int:
+    name = args.name
+    if name not in load_registry():
+        return die(f"unknown context {name!r}")
+    cmd = list(args.cmd or [])
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        return die("usage: ctx exec <name> -- <command> [args...]")
+    env = dict(os.environ)
+    env.update(env_dict(name))
+    try:
+        return subprocess.run(cmd, env=env).returncode
+    except FileNotFoundError:
+        return die(f"command not found: {cmd[0]}")
+
+
+def cmd_status(args) -> int:
+    print(f"context: {os.environ.get('CLOUDCTX_CONTEXT', '(none)')}")
+
+    if shutil.which("az"):
+        r = subprocess.run(["az", "account", "show", "-o", "json"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            try:
+                d = json.loads(r.stdout)
+                user = (d.get("user") or {}).get("name")
+                print(f"azure:   {d.get('name')} ({d.get('id')})  "
+                      f"tenant={d.get('tenantId')}  user={user}")
+            except (ValueError, AttributeError):
+                print("azure:   (could not parse `az account show`)")
+        else:
+            print("azure:   not logged in (run: ctx login <name>)")
+    else:
+        print("azure:   az CLI not installed")
+
+    if shutil.which("aws"):
+        r = subprocess.run(["aws", "sts", "get-caller-identity", "--output", "json"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            try:
+                d = json.loads(r.stdout)
+                print(f"aws:     account={d.get('Account')}  arn={d.get('Arn')}")
+            except ValueError:
+                print("aws:     (could not parse caller identity)")
+        else:
+            print("aws:     not authenticated")
+    else:
+        print("aws:     not configured (aws CLI not installed)")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -352,6 +410,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_dec.add_argument("name", nargs="?")
     p_dec.add_argument("--clear", action="store_true")
     p_dec.set_defaults(func=cmd_decorate)
+
+    p_exec = sub.add_parser("exec", help="run one command in a context (shell unchanged)")
+    p_exec.add_argument("name")
+    p_exec.add_argument("cmd", nargs=argparse.REMAINDER,
+                        help="-- <command> [args...]")
+    p_exec.set_defaults(func=cmd_exec)
+
+    p_status = sub.add_parser("status", aliases=["whoami"],
+                              help="show the real identity for this shell")
+    p_status.set_defaults(func=cmd_status)
 
     return p
 

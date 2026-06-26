@@ -11,12 +11,23 @@ import importlib.util
 import io
 import os
 import shutil
+import stat
+import subprocess
 import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+CLI = str(ROOT / "cloudctx")
+
+
+def write_stub(directory, name, body):
+    """Drop an executable shell stub (e.g. a fake `az`) into `directory`."""
+    p = Path(directory) / name
+    p.write_text("#!/bin/sh\n" + body)
+    p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return p
 
 
 def load():
@@ -216,6 +227,42 @@ class TestDecorate(Base):
         _, out = self.run_cli("_decorate", "nocolor")
         self.assertNotIn("SetColors=tab=", out)
         self.assertIn("SetBadgeFormat=", out)  # badge still set
+
+
+class TestExecStatus(Base):
+    def _run_bin(self, *args, extra_path=None):
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        if extra_path:
+            env["PATH"] = extra_path + os.pathsep + env.get("PATH", "")
+        return subprocess.run([CLI, *args], env=env, capture_output=True, text=True)
+
+    def test_exec_sets_context_env(self):
+        self.run_cli("new", "acme", "--azure-tenant", "t", "--no-login")
+        r = self._run_bin("exec", "acme", "--", "printenv", "AZURE_CONFIG_DIR")
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn(os.path.join("acme", "azure"), r.stdout)
+
+    def test_exec_propagates_exit_code(self):
+        self.run_cli("new", "acme", "--no-login")
+        r = self._run_bin("exec", "acme", "--", "sh", "-c", "exit 7")
+        self.assertEqual(r.returncode, 7)
+
+    def test_exec_unknown_context(self):
+        r = self._run_bin("exec", "nope", "--", "true")
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_status_reports_azure_subscription(self):
+        self.run_cli("new", "acme", "--azure-tenant", "t", "--no-login")
+        stubdir = tempfile.mkdtemp(prefix="stub-")
+        self.addCleanup(shutil.rmtree, stubdir, ignore_errors=True)
+        write_stub(stubdir, "az",
+                   'echo \'{"name":"Prod Sub","id":"sub-123",'
+                   '"tenantId":"t-9","user":{"name":"me@example.com"}}\'')
+        r = self._run_bin("status", extra_path=stubdir)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("Prod Sub", r.stdout)
+        self.assertIn("me@example.com", r.stdout)
 
 
 if __name__ == "__main__":
