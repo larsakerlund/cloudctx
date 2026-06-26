@@ -556,6 +556,31 @@ def cmd_gen_profiles(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# install — print (or write) the shell-rc line that sources the shim.
+# --------------------------------------------------------------------------
+def script_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def cmd_install(args) -> int:
+    requested = args.shell or os.path.basename(os.environ.get("SHELL", "zsh"))
+    shell = "bash" if "bash" in requested else "zsh"
+    shim = script_dir() / "shell" / f"ctx.{shell}"
+    rc = Path.home() / (".bashrc" if shell == "bash" else ".zshrc")
+    line = f"source {shim}"
+    if args.write:
+        with open(rc, "a", encoding="utf-8") as f:
+            f.write(f"\n# cloudctx\n{line}\n")
+        print(f"appended to {rc}:\n  {line}\nOpen a new shell to activate.")
+    else:
+        print(f"# add to {rc}:")
+        print(line)
+        print(f"# and make sure `cloudctx` is on PATH (it lives at {script_dir() / 'cloudctx'})")
+        print("# re-run with --write to append the source line automatically.")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -633,6 +658,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_gen = sub.add_parser("gen-profiles",
                            help="regenerate the iTerm2 dynamic profiles file")
     p_gen.set_defaults(func=cmd_gen_profiles)
+
+    p_install = sub.add_parser("install", help="print/write the shell-rc source line")
+    p_install.add_argument("--shell", choices=["zsh", "bash"],
+                           help="target shell (default: from $SHELL)")
+    p_install.add_argument("--write", action="store_true",
+                           help="append the source line to your rc file")
+    p_install.set_defaults(func=cmd_install)
 
     return p
 

@@ -1,0 +1,19 @@
+# cloudctx — Starship segment
+#
+# Paste this into ~/.config/starship.toml. The built-in env_var module is the
+# simplest correct way to surface an environment variable (no subprocess), and
+# because each shell reads its own isolated context, this indicator is stable
+# and never flips when another window re-authenticates.
+
+[env_var.CLOUDCTX_CONTEXT]
+variable = 'CLOUDCTX_CONTEXT'
+default = ''
+symbol = '☁ '
+format = 'on [$symbol$env_value]($style) '
+style = 'bold cyan'
+
+# env_var modules are NOT in Starship's default prompt order, so you must place
+# it explicitly in your top-level `format`. The dotted module name requires the
+# ${...} form. Example (adjust to your existing format):
+#
+#   format = '$all${env_var.CLOUDCTX_CONTEXT}$character'

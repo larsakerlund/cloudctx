@@ -357,5 +357,25 @@ class TestProfiles(Base):
         self.assertEqual(len(data["Profiles"]), 1)
 
 
+class TestInstall(Base):
+    def test_install_prints_source_line(self):
+        code, out = self.run_cli("install")
+        self.assertEqual(code, 0)
+        self.assertIn("source", out)
+        self.assertIn("ctx.zsh", out)
+
+    def test_install_bash_variant(self):
+        code, out = self.run_cli("install", "--shell", "bash")
+        self.assertIn("ctx.bash", out)
+
+    def test_install_write_appends_to_rc(self):
+        os.environ["HOME"] = self.tmp
+        code, out = self.run_cli("install", "--shell", "zsh", "--write")
+        self.assertEqual(code, 0)
+        rc = Path(self.tmp) / ".zshrc"
+        self.assertTrue(rc.exists())
+        self.assertIn("ctx.zsh", rc.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
