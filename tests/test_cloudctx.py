@@ -134,7 +134,7 @@ class TestNew(Base):
 
 
 class TestEnv(Base):
-    def test_azure_only_no_aws_vars(self):
+    def test_azure_only_unsets_aws_vars(self):
         self.run_cli("new", "acme", "--display", "Acme AB",
                      "--azure-tenant", "t", "--azure-subscription", "Prod", "--no-login")
         code, out = self.run_cli("_env", "acme")
@@ -142,9 +142,18 @@ class TestEnv(Base):
         self.assertIn("export AZURE_CONFIG_DIR=", out)
         self.assertIn("export CLOUDCTX_CONTEXT='acme'", out)
         self.assertIn("export CLOUDCTX_AZURE_LABEL='Prod'", out)
-        self.assertNotIn("AWS_PROFILE", out)
-        # the azure dir path points inside this context
+        # AWS vars must be explicitly UNSET (not merely absent) so a context
+        # switch fully replaces the previous context's environment.
+        self.assertNotIn("export AWS_PROFILE", out)
+        self.assertIn("unset AWS_PROFILE", out)
+        self.assertIn("unset AWS_CONFIG_FILE", out)
         self.assertIn(str(self.cc.azure_dir("acme").resolve()), out)
+
+    def test_env_unsets_label_when_no_subscription(self):
+        self.run_cli("new", "bare", "--azure-tenant", "t", "--no-login")
+        _, out = self.run_cli("_env", "bare")
+        self.assertNotIn("export CLOUDCTX_AZURE_LABEL", out)
+        self.assertIn("unset CLOUDCTX_AZURE_LABEL", out)
 
     def test_aws_vars_when_present(self):
         self.run_cli("new", "globex", "--aws-profile", "globex", "--no-login")
@@ -355,6 +364,87 @@ class TestProfiles(Base):
         self.run_cli("new", "acme", "--color", "#2980b9", "--no-login")
         data = json.loads(Path(self.cc.profiles_path()).read_text())
         self.assertEqual(len(data["Profiles"]), 1)
+
+
+class TestReviewFixes(Base):
+    """Regression tests for issues found by the adversarial review."""
+
+    def test_exec_strips_inherited_managed_vars(self):
+        # Finding #4: exec into an Azure-only context must not leak a caller's AWS_PROFILE.
+        self.run_cli("new", "acme", "--azure-tenant", "t", "--no-login")
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        env["AWS_PROFILE"] = "stale-leak"
+        env["AWS_CONFIG_FILE"] = "/tmp/stale/config"
+        r = subprocess.run([CLI, "exec", "acme", "--", "sh", "-c",
+                            "echo P=$AWS_PROFILE C=$AWS_CONFIG_FILE"],
+                           env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("P= ", r.stdout + " ")  # AWS_PROFILE empty in child
+        self.assertNotIn("stale-leak", r.stdout)
+
+    def test_load_registry_drops_traversal_names(self):
+        # Finding #1: a hand-edited registry with a path-traversal table name
+        # must not become a usable context.
+        Path(self.cc.registry_path()).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.cc.registry_path()).write_text(
+            '[acme]\ndisplay = "Acme"\n\n[../../evil]\ndisplay = "Evil"\n')
+        reg = self.cc.load_registry()
+        self.assertIn("acme", reg)
+        self.assertNotIn("../../evil", reg)
+
+    def test_env_rejects_traversal_name(self):
+        code, out = self.run_cli("_env", "../../evil")
+        self.assertNotEqual(code, 0)
+
+    def test_toml_roundtrips_newline_value(self):
+        # Findings #5/#6: a newline in a value must survive (not truncate/crash).
+        data = {"x": {"display": "line1\nline2\twith tab"}}
+        self.cc.save_registry(data)
+        self.assertEqual(self.cc.load_registry(), data)
+
+    def test_new_rejects_invalid_color(self):
+        # Finding #12: invalid --color should fail fast, not silently drop later.
+        code, out = self.run_cli("new", "acme", "--color", "not-a-color", "--no-login")
+        self.assertNotEqual(code, 0)
+        self.assertIn("color", out.lower())
+
+    def test_decorate_sanitizes_control_chars_in_title(self):
+        # Finding #10: control chars in display must not inject a second OSC.
+        # The text may survive as plain title text; what must NOT survive is a
+        # raw ESC/BEL inside the title payload (that's what enables injection).
+        self.run_cli("new", "acme", "--display", "Acme\x07\x1b]0;HIJACK\x07", "--no-login")
+        _, out = self.run_cli("_decorate", "acme")
+        payload = out.split("\x1b]0;", 1)[1].split("\x07", 1)[0]
+        self.assertNotIn("\x1b", payload)
+        self.assertNotIn("\x07", payload)
+
+    def test_decorate_no_name_usage(self):
+        # Finding #16: clearer message than "unknown context None".
+        code, out = self.run_cli("_decorate")
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("None", out)
+
+    def test_status_tolerates_non_object_json(self):
+        # Finding #11: aws returning a JSON array must not crash status.
+        self.run_cli("new", "acme", "--azure-tenant", "t", "--no-login")
+        stubdir = tempfile.mkdtemp(prefix="stub-")
+        self.addCleanup(shutil.rmtree, stubdir, ignore_errors=True)
+        write_stub(stubdir, "aws", "echo '[1,2,3]'")
+        write_stub(stubdir, "az", "exit 1")  # az "not logged in"
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        env["PATH"] = stubdir + os.pathsep + env["PATH"]
+        r = subprocess.run([CLI, "status"], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_permissions_locked_down(self):
+        # Finding #9: registry root 0700, contexts.toml 0600, stores 0700.
+        self.run_cli("new", "acme", "--no-login")
+        self.assertEqual(stat.S_IMODE(os.stat(self.cc.registry_path()).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(self.cc.REGISTRY_ROOT()).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(self.cc.azure_dir("acme")).st_mode), 0o700)
 
 
 class TestInstall(Base):

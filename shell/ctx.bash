@@ -25,26 +25,49 @@ ctx() {
 }
 
 # --- prompt segment + az/aws guard ----------------------------------------
-# Shared guard logic (callable directly; also driven by the DEBUG trap).
+# Guard takes a full command line, skips leading VAR=value assignments and
+# common wrappers (sudo/command/env/...), then warns if the real command is
+# az/aws with no context selected. Callable directly; also driven by the trap.
 _cctx_guard() {
-  case "$1" in
+  local -a words
+  read -ra words <<< "$1"
+  local i=0
+  while [ "$i" -lt "${#words[@]}" ]; do
+    case "${words[$i]}" in
+      *=*|sudo|command|env|nice|nohup|time|builtin|exec|stdbuf) i=$((i + 1)) ;;
+      *) break ;;
+    esac
+  done
+  case "${words[$i]:-}" in
     az|aws)
-      if [[ -z "$CLOUDCTX_CONTEXT" ]]; then
-        echo "cloudctx: WARNING — '$1' run with no context selected (using global default store). Run 'ctx use <name>' first." >&2
+      if [ -z "$CLOUDCTX_CONTEXT" ]; then
+        echo "cloudctx: WARNING — '${words[$i]}' run with no context selected (using global default store). Run 'ctx use <name>' first." >&2
       fi
       ;;
   esac
 }
 
-# Bash has no native preexec; the DEBUG trap fires before each simple command.
-# It fires per-simple-command (so a pipeline can fire several times); we only
-# inspect the first word, so a cloud tool warns at most once per line. For a
-# fully de-duplicated preexec, layer in rcaloras/bash-preexec.
-cloudctx_debug() {
-  local _first=${BASH_COMMAND%% *}
-  _cctx_guard "$_first"
-}
-trap 'cloudctx_debug' DEBUG
+cloudctx_debug() { _cctx_guard "$BASH_COMMAND"; }
+
+# Bash has no native preexec. Prefer rcaloras/bash-preexec if it's installed
+# (compose cleanly); otherwise chain onto any existing DEBUG trap instead of
+# clobbering it (starship/atuin/direnv often install one). The DEBUG trap fires
+# per simple command, so we inspect only the first word -> at most one warning.
+if [ -n "${preexec_functions+x}" ]; then
+  _cctx_bp_preexec() { _cctx_guard "$1"; }
+  preexec_functions+=(_cctx_bp_preexec)
+else
+  __cctx_prev_debug="$(trap -p DEBUG)"
+  if [ -n "$__cctx_prev_debug" ]; then
+    __cctx_prev_debug="${__cctx_prev_debug#trap -- }"   # strip prefix
+    __cctx_prev_debug="${__cctx_prev_debug% DEBUG}"      # strip suffix
+    __cctx_prev_debug="${__cctx_prev_debug#\'}"          # strip outer quotes
+    __cctx_prev_debug="${__cctx_prev_debug%\'}"
+    trap "${__cctx_prev_debug}; cloudctx_debug" DEBUG
+  else
+    trap 'cloudctx_debug' DEBUG
+  fi
+fi
 
 # Show the active context (and short Azure subscription label) in the prompt.
 PS1='${CLOUDCTX_CONTEXT:+\[\e[36m\][${CLOUDCTX_CONTEXT}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL}}]\[\e[0m\] }'"$PS1"

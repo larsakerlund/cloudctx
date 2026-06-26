@@ -42,6 +42,9 @@ def registry_path() -> Path:
 
 
 def context_dir(name: str) -> Path:
+    # Defense in depth: never turn an unsafe name into a path component.
+    if not NAME_RE.match(name):
+        raise ValueError(f"unsafe context name {name!r}")
     return REGISTRY_ROOT() / name
 
 
@@ -62,6 +65,16 @@ def die(msg: str) -> int:
     return 1
 
 
+def _chmod(path, mode) -> None:
+    """chmod that warns rather than silently swallowing failure — these modes
+    protect a credential store, so a silent miss must not go unnoticed."""
+    try:
+        os.chmod(path, mode)
+    except OSError as e:
+        print(f"cloudctx: warning: could not set {oct(mode)} on {path}: {e}",
+              file=sys.stderr)
+
+
 # --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
@@ -72,13 +85,17 @@ def cmd_new(args) -> int:
     registry = load_registry()
     if name in registry:
         return die(f"context {name!r} already exists")
+    if args.color:
+        try:
+            hex_to_rgb255(args.color)
+        except ValueError:
+            return die(f"invalid color {args.color!r} (use #rgb or #rrggbb)")
 
     azure_dir(name).mkdir(parents=True, exist_ok=True)
     (context_dir(name) / "aws").mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(context_dir(name), 0o700)  # credential store: owner-only
-    except OSError:
-        pass
+    # Lock down the whole per-context credential store (tokens land here).
+    for d in (context_dir(name), azure_dir(name), context_dir(name) / "aws"):
+        _chmod(d, 0o700)
 
     entry = {}
     if args.display:
@@ -162,7 +179,8 @@ def _parse_value(rhs: str) -> str:
             ch = rhs[i]
             if ch == "\\" and i + 1 < len(rhs):
                 nxt = rhs[i + 1]
-                out.append({'"': '"', "\\": "\\", "n": "\n", "t": "\t"}.get(nxt, nxt))
+                out.append({'"': '"', "\\": "\\", "n": "\n", "t": "\t",
+                            "r": "\r"}.get(nxt, nxt))
                 i += 2
                 continue
             if ch == '"':
@@ -175,7 +193,10 @@ def _parse_value(rhs: str) -> str:
 
 
 def _escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    # Must encode control chars too: a raw newline produces invalid TOML that
+    # tomllib (3.11+) rejects outright and the 3.9 fallback silently truncates.
+    return (value.replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r"))
 
 
 def _dump_toml(data: dict) -> str:
@@ -193,17 +214,28 @@ def load_registry() -> dict:
     if not path.exists():
         return {}
     text = path.read_text(encoding="utf-8")
-    if _tomllib is not None:
-        return _tomllib.loads(text)
-    return _parse_toml(text)
+    data = _tomllib.loads(text) if _tomllib is not None else _parse_toml(text)
+    # The registry is untrusted input (it may be hand-edited or synced). Drop any
+    # table whose name isn't a safe context name, so a crafted key like
+    # `[../../evil]` can never be resolved into a path outside the store.
+    clean = {}
+    for key, value in data.items():
+        if NAME_RE.match(key):
+            clean[key] = value
+        else:
+            print(f"cloudctx: warning: ignoring invalid context name {key!r} "
+                  f"in {path}", file=sys.stderr)
+    return clean
 
 
 def save_registry(data: dict) -> None:
     root = REGISTRY_ROOT()
     root.mkdir(parents=True, exist_ok=True)
+    _chmod(root, 0o700)  # registry root holds credential stores: owner-only
     path = registry_path()
     tmp = path.with_suffix(".toml.tmp")
     tmp.write_text(_dump_toml(data), encoding="utf-8")
+    _chmod(tmp, 0o600)   # contexts.toml holds tenant/account identifiers
     os.replace(tmp, path)  # atomic on POSIX
 
 
@@ -243,7 +275,12 @@ def env_dict(name: str) -> dict:
 
 
 def env_lines(name: str) -> list:
-    return [f"export {k}={shquote(v)}" for k, v in env_dict(name).items()]
+    env = env_dict(name)
+    lines = [f"export {k}={shquote(v)}" for k, v in env.items()]
+    # Explicitly unset every managed var this context does NOT set, so a single
+    # eval fully *replaces* the previous context (no stale AWS_*/label bleed).
+    lines += [f"unset {var}" for var in CLEARABLE_VARS if var not in env]
+    return lines
 
 
 def cmd_env(args) -> int:
@@ -292,8 +329,14 @@ def _badge_seq(text: str) -> str:
     return f"{ESC}]1337;SetBadgeFormat={b64}{BEL}"
 
 
+def _strip_controls(text: str) -> str:
+    # Drop C0 control chars so a crafted display can't terminate the OSC early
+    # and inject its own escape sequence (the badge is base64, so safe already).
+    return "".join(ch for ch in text if ord(ch) >= 0x20)
+
+
 def _title_seq(text: str) -> str:
-    return f"{ESC}]0;{text}{BEL}"  # OSC 0 sets both tab and window title
+    return f"{ESC}]0;{_strip_controls(text)}{BEL}"  # OSC 0 sets tab+window title
 
 
 def _tabcolor_seq(hex6: str) -> str:
@@ -322,7 +365,9 @@ def cmd_decorate(args) -> int:
     if args.clear:
         sys.stdout.write(decorate_clear())
         return 0
-    if not args.name or args.name not in load_registry():
+    if not args.name:
+        return die("usage: cloudctx _decorate <name> | --clear")
+    if args.name not in load_registry():
         return die(f"unknown context {args.name!r}")
     sys.stdout.write(decorate_bytes(args.name))
     return 0
@@ -391,7 +436,9 @@ def cmd_exec(args) -> int:
         cmd = cmd[1:]
     if not cmd:
         return die("usage: ctx exec <name> -- <command> [args...]")
-    env = dict(os.environ)
+    # Strip any managed vars inherited from the caller's shell before overlaying
+    # this context's, so exec is fail-closed (no other context's AWS_* leaks in).
+    env = {k: v for k, v in os.environ.items() if k not in CLEARABLE_VARS}
     env.update(env_dict(name))
     try:
         return subprocess.run(cmd, env=env).returncode
@@ -425,7 +472,7 @@ def cmd_status(args) -> int:
             try:
                 d = json.loads(r.stdout)
                 print(f"aws:     account={d.get('Account')}  arn={d.get('Arn')}")
-            except ValueError:
+            except (ValueError, AttributeError):
                 print("aws:     (could not parse caller identity)")
         else:
             print("aws:     not authenticated")

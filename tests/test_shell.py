@@ -109,6 +109,82 @@ class TestShimZsh(unittest.TestCase):
         r = self.run_script(f'{echo} "{MARK}${self.pvar}"')
         self.assertIn("CLOUDCTX_CONTEXT", extract(r.stdout) or "", msg=r.stderr)
 
+    # --- review regression tests ---
+    def _new(self, *args):
+        subprocess.run([str(ROOT / "cloudctx"), "new", *args, "--no-login"],
+                       env=self.env, check=True, capture_output=True)
+
+    def test_switch_clears_stale_aws_vars(self):
+        # Findings #2/#3: switching AWS context -> Azure-only must clear AWS_*.
+        self._new("awsctx", "--aws-profile", "awsctx")
+        echo = "print -r --" if self.shell == "zsh" else "echo"
+        r = self.run_script(f'''
+            ctx use awsctx >/dev/null
+            ctx use acme >/dev/null
+            {echo} "{MARK}[$CLOUDCTX_CONTEXT|$AWS_PROFILE|$CLOUDCTX_AZURE_LABEL]"
+        ''')
+        self.assertEqual(extract(r.stdout), "[acme||Prod]", msg=r.stderr)
+
+    def test_switch_clears_stale_label(self):
+        # Finding #7: Azure(sub) -> Azure(no sub) must clear the label.
+        self._new("bare", "--azure-tenant", "t2")
+        echo = "print -r --" if self.shell == "zsh" else "echo"
+        r = self.run_script(f'''
+            ctx use acme >/dev/null
+            ctx use bare >/dev/null
+            {echo} "{MARK}[$CLOUDCTX_CONTEXT|$CLOUDCTX_AZURE_LABEL]"
+        ''')
+        self.assertEqual(extract(r.stdout), "[bare|]", msg=r.stderr)
+
+    def test_guard_strips_wrappers(self):
+        # Finding #15: `sudo az ...` should still trigger the guard.
+        r = self.run_script('_cctx_guard "sudo az login"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_strips_assignments(self):
+        # Finding #15: leading VAR=val assignments should be skipped.
+        r = self.run_script('_cctx_guard "FOO=bar aws s3 ls"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_zsh_prompt_escapes_percent(self):
+        # Finding #14: a '%' in the subscription label must not be a prompt escape.
+        # Assert (a) the PROMPT embeds the %-doubling, and (b) that idiom renders
+        # a literal % under zsh prompt expansion (${(%)...}). If % were NOT
+        # doubled, '100%n' would prompt-expand to '100<username>'.
+        if self.shell != "zsh":
+            self.skipTest("zsh-specific prompt percent escaping")
+        r = self.run_script(r'''
+            case "$PROMPT" in
+              *'//\%/%%'*) hasesc=yes ;;
+              *) hasesc=no ;;
+            esac
+            label='100%n'
+            esc="${label//\%/%%}"
+            print -r -- "CCTX=$hasesc|${(%)esc}"
+        ''')
+        self.assertEqual(extract(r.stdout), "yes|100%n", msg=r.stderr)
+
+    def test_bash_debug_trap_chains(self):
+        # Finding #8: sourcing the shim must not clobber a pre-existing DEBUG trap.
+        # Check the prior handler still fires for a command issued AFTER sourcing
+        # (a marker file, cleared post-source, isolates that from source-time fires).
+        if self.shell != "bash":
+            self.skipTest("bash-specific DEBUG trap chaining")
+        script = (
+            'M=$(mktemp)\n'
+            "trap 'echo X >> \"$M\"' DEBUG\n"
+            f"source {ROOT}/shell/ctx.bash\n"
+            ': > "$M"\n'        # clear fires that happened during sourcing
+            'true\n'            # post-source command must re-trigger the prior trap
+            'n=$(wc -l < "$M"); rm -f "$M"\n'
+            'echo "CCTX=$n"\n'
+        )
+        r = subprocess.run([self.shell, "--norc", "--noprofile", "-c", script],
+                           env=self.env, capture_output=True, text=True)
+        n = extract(r.stdout)
+        self.assertTrue(n and int(n.strip()) > 0,
+                        msg=f"prior DEBUG trap was clobbered (n={n}) {r.stderr}")
+
 
 @unittest.skipUnless(shutil.which("bash"), "bash not installed")
 class TestShimBash(TestShimZsh):
