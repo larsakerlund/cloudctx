@@ -86,11 +86,35 @@ class TestShimZsh(unittest.TestCase):
         ''')
         self.assertEqual(extract(r.stdout), "1", msg=r.stderr)
 
+    # --- Task 7: prompt segment + guard ---
+    pvar = "PROMPT"
+
+    def test_guard_warns_without_context(self):
+        r = self.run_script('_cctx_guard az')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_silent_with_context(self):
+        r = self.run_script('''
+            ctx use acme >/dev/null
+            _cctx_guard az
+        ''')
+        self.assertNotIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_ignores_non_cloud_commands(self):
+        r = self.run_script('_cctx_guard ls')
+        self.assertEqual(r.stderr.strip(), "", msg=r.stderr)
+
+    def test_prompt_has_context_segment(self):
+        echo = "print -r --" if self.shell == "zsh" else "echo"
+        r = self.run_script(f'{echo} "{MARK}${self.pvar}"')
+        self.assertIn("CLOUDCTX_CONTEXT", extract(r.stdout) or "", msg=r.stderr)
+
 
 @unittest.skipUnless(shutil.which("bash"), "bash not installed")
 class TestShimBash(TestShimZsh):
     shell = "bash"
     rcflag = "--norc"
+    pvar = "PS1"
 
     def run_script(self, body):
         script = f"source {ROOT}/shell/ctx.{self.shell}\n" + textwrap.dedent(body)
