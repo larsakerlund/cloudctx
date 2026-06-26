@@ -122,5 +122,56 @@ class TestNew(Base):
         self.assertIn("*", active_line)
 
 
+class TestEnv(Base):
+    def test_azure_only_no_aws_vars(self):
+        self.run_cli("new", "acme", "--display", "Acme AB",
+                     "--azure-tenant", "t", "--azure-subscription", "Prod", "--no-login")
+        code, out = self.run_cli("_env", "acme")
+        self.assertEqual(code, 0)
+        self.assertIn("export AZURE_CONFIG_DIR=", out)
+        self.assertIn("export CLOUDCTX_CONTEXT='acme'", out)
+        self.assertIn("export CLOUDCTX_AZURE_LABEL='Prod'", out)
+        self.assertNotIn("AWS_PROFILE", out)
+        # the azure dir path points inside this context
+        self.assertIn(str(self.cc.azure_dir("acme").resolve()), out)
+
+    def test_aws_vars_when_present(self):
+        self.run_cli("new", "globex", "--aws-profile", "globex", "--no-login")
+        code, out = self.run_cli("_env", "globex")
+        self.assertIn("export AWS_PROFILE='globex'", out)
+        self.assertIn("export AWS_CONFIG_FILE=", out)
+        self.assertIn("export AWS_SHARED_CREDENTIALS_FILE=", out)
+
+    def test_aws_profile_defaults_to_name(self):
+        # an aws field present but no explicit aws_profile -> profile defaults to ctx name
+        self.run_cli("new", " initech".strip(), "--aws-account-id", "123", "--no-login")
+        code, out = self.run_cli("_env", "initech")
+        self.assertIn("export AWS_PROFILE='initech'", out)
+
+    def test_injection_safe(self):
+        self.run_cli("new", "x", "--azure-subscription", "a'; rm -rf $HOME; '", "--no-login")
+        code, out = self.run_cli("_env", "x")
+        # the dangerous single quote must be neutralized via the '\'' idiom,
+        # so no bare `; rm -rf` escapes the quoting.
+        self.assertIn("'\\''", out)
+        self.assertNotIn("='a'; rm", out)
+
+    def test_unknown_context_errors_with_empty_stdout(self):
+        # stdout must stay empty so `eval "$(... )"` is a safe no-op
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = self.cc.main(["_env", "nope"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out.getvalue().strip(), "")
+
+    def test_clear(self):
+        code, out = self.run_cli("_env", "--clear")
+        self.assertEqual(code, 0)
+        self.assertIn("unset AZURE_CONFIG_DIR", out)
+        self.assertIn("unset CLOUDCTX_CONTEXT", out)
+        self.assertIn("unset AWS_PROFILE", out)
+
+
 if __name__ == "__main__":
     unittest.main()

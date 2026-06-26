@@ -193,6 +193,57 @@ def save_registry(data: dict) -> None:
 
 
 # --------------------------------------------------------------------------
+# Env emission — the isolation core. `_env` prints shell statements that the
+# sourced `ctx` shim eval's into the parent shell. Values are single-quote
+# escaped because the registry is untrusted input to that eval.
+# --------------------------------------------------------------------------
+CLEARABLE_VARS = [
+    "CLOUDCTX_CONTEXT", "CLOUDCTX_AZURE_LABEL", "AZURE_CONFIG_DIR",
+    "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_PROFILE",
+]
+
+
+def shquote(s: str) -> str:
+    """POSIX-safe single-quoting: wrap in '...' and escape embedded ' as '\\''."""
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def env_dict(name: str) -> dict:
+    """The environment a context exports, as a plain dict (shared by _env and exec)."""
+    entry = load_registry()[name]
+    env = {
+        "CLOUDCTX_CONTEXT": name,
+        # Always redirect Azure to the isolated store — even an AWS-only context
+        # should never fall back to the global ~/.azure.
+        "AZURE_CONFIG_DIR": str(azure_dir(name).resolve()),
+    }
+    if entry.get("azure_subscription"):
+        env["CLOUDCTX_AZURE_LABEL"] = entry["azure_subscription"]
+    # AWS vars only when the context actually defines AWS fields (v1 = opt-in).
+    if any(entry.get(f) for f in AWS_FIELDS):
+        env["AWS_CONFIG_FILE"] = str(aws_config(name).resolve())
+        env["AWS_SHARED_CREDENTIALS_FILE"] = str(aws_credentials(name).resolve())
+        env["AWS_PROFILE"] = entry.get("aws_profile") or name
+    return env
+
+
+def env_lines(name: str) -> list:
+    return [f"export {k}={shquote(v)}" for k, v in env_dict(name).items()]
+
+
+def cmd_env(args) -> int:
+    if args.clear:
+        print("\n".join(f"unset {var}" for var in CLEARABLE_VARS))
+        return 0
+    if not args.name:
+        return die("usage: cloudctx _env <name> | --clear")
+    if args.name not in load_registry():
+        return die(f"unknown context {args.name!r}")
+    print("\n".join(env_lines(args.name)))
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -216,6 +267,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--no-login", action="store_true",
                        help="scaffold only; skip first-time authentication")
     p_new.set_defaults(func=cmd_new)
+
+    # Internal: consumed by the sourced shell shim, not meant for direct use.
+    p_env = sub.add_parser("_env", help="(internal) emit shell export/unset lines")
+    p_env.add_argument("name", nargs="?")
+    p_env.add_argument("--clear", action="store_true")
+    p_env.set_defaults(func=cmd_env)
 
     return p
 
