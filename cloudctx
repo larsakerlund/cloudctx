@@ -256,6 +256,13 @@ def _parse_value(rhs: str) -> str:
             ch = rhs[i]
             if ch == "\\" and i + 1 < len(rhs):
                 nxt = rhs[i + 1]
+                if nxt == "u" and i + 5 < len(rhs):
+                    try:
+                        out.append(chr(int(rhs[i + 2:i + 6], 16)))
+                        i += 6
+                        continue
+                    except ValueError:
+                        pass  # not 4 hex digits: fall through to literal 'u'
                 out.append({'"': '"', "\\": "\\", "n": "\n", "t": "\t",
                             "r": "\r"}.get(nxt, nxt))
                 i += 2
@@ -270,10 +277,19 @@ def _parse_value(rhs: str) -> str:
 
 
 def _escape(value: str) -> str:
-    # Must encode control chars too: a raw newline produces invalid TOML that
-    # tomllib (3.11+) rejects outright and the 3.9 fallback silently truncates.
-    return (value.replace("\\", "\\\\").replace('"', '\\"')
-            .replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r"))
+    # Must encode ALL control chars: TOML forbids them raw inside strings, so
+    # a stray BEL/ESC (or newline) would make the file unreadable to tomllib
+    # (3.11+) while the 3.9 fallback silently mangles it.
+    named = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\t": "\\t", "\r": "\\r"}
+    out = []
+    for ch in value:
+        if ch in named:
+            out.append(named[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7f:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _dump_toml(data: dict) -> str:
@@ -291,7 +307,14 @@ def load_registry() -> dict:
     if not path.exists():
         return {}
     text = path.read_text(encoding="utf-8")
-    data = _tomllib.loads(text) if _tomllib is not None else _parse_toml(text)
+    try:
+        data = _tomllib.loads(text) if _tomllib is not None else _parse_toml(text)
+    except Exception as e:
+        # A corrupt registry must fail loudly and cleanly — NOT return {}.
+        # (An empty result would let the next save_registry() rewrite the file
+        # and silently drop every other context.)
+        die(f"could not parse {path}: {e} — fix or remove that file")
+        raise SystemExit(1)
     # The registry is untrusted input (it may be hand-edited or synced). Drop any
     # table whose name isn't a safe context name, so a crafted key like
     # `[../../evil]` can never be resolved into a path outside the store.

@@ -71,16 +71,21 @@ cloudctx new acme --display "Acme AB" --color "#c0392b" \
 
 cloudctx use acme          # export env into THIS shell + set iTerm2 badge/title/tab color
 cloudctx list              # list contexts; * marks the one active in this shell
+cloudctx list -v           # ...with display/azure/aws columns
+cloudctx show acme         # full registry entry + store paths
 cloudctx status            # the REAL identity here: az account show + aws sts
-cloudctx login acme        # re-authenticate (e.g. after token expiry)
+cloudctx login acme        # re-authenticate; verifies the landed tenant matches
 cloudctx exec acme -- terraform plan   # run one command in a context; shell unchanged
 cloudctx open acme --cd ~/proj --claude  # new scoped iTerm2 window, cd, run claude
 cloudctx claude acme ~/proj              # shorthand for the above
 cloudctx clear             # unset the vars + reset the window decoration
+cloudctx delete acme       # remove the registry entry AND ~/.cloudctx/acme
+                           #   (asks first; --force to skip, --keep-store to keep files)
 ```
 
 Add `--dry-run` to `login`/`open`/`claude` to print the commands instead of
-running them.
+running them. The shim registers tab completion for subcommands and context
+names in both zsh (needs compinit before sourcing) and bash.
 
 ### The guard
 

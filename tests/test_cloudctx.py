@@ -13,6 +13,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
@@ -511,13 +512,46 @@ class TestReviewFixes(Base):
 
     def test_load_registry_drops_traversal_names(self):
         # Finding #1: a hand-edited registry with a path-traversal table name
-        # must not become a usable context.
+        # must not become a usable context. Quoted-key form, which is valid
+        # TOML — both tomllib and the fallback parse it, then the name filter
+        # must drop it.
         Path(self.cc.registry_path()).parent.mkdir(parents=True, exist_ok=True)
         Path(self.cc.registry_path()).write_text(
-            '[acme]\ndisplay = "Acme"\n\n[../../evil]\ndisplay = "Evil"\n')
+            '[acme]\ndisplay = "Acme"\n\n["../../evil"]\ndisplay = "Evil"\n')
         reg = self.cc.load_registry()
         self.assertIn("acme", reg)
         self.assertNotIn("../../evil", reg)
+        self.assertNotIn('"../../evil"', reg)
+
+    def test_unparsable_registry_fails_cleanly(self):
+        # 3.13 regression (this branch): a bare `[../../evil]` header is
+        # INVALID TOML — tomllib must produce a clean error, never a traceback
+        # (and never an empty registry, which a later save would persist).
+        # The 3.9 fallback is lenient and drops the bad table instead.
+        Path(self.cc.registry_path()).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.cc.registry_path()).write_text(
+            '[acme]\ndisplay = "Acme"\n\n[../../evil]\ndisplay = "Evil"\n')
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        # run under THIS interpreter so the tomllib branch below matches the
+        # parser the subprocess actually used (the shebang may be older).
+        r = subprocess.run([sys.executable, CLI, "list"], env=env,
+                           capture_output=True, text=True)
+        self.assertNotIn("Traceback", r.stderr)
+        if self.cc._tomllib is not None:
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("could not parse", r.stderr)
+        else:
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            self.assertIn("acme", r.stdout)
+
+    def test_control_chars_in_values_roundtrip(self):
+        # 3.13 regression (this branch): _escape must encode BEL/ESC etc. as
+        # \uXXXX — raw control chars are invalid TOML and locked tomllib out
+        # of the registry entirely.
+        data = {"x": {"display": "Acme\x07\x1b]0;HIJACK\x07"}}
+        self.cc.save_registry(data)
+        self.assertEqual(self.cc.load_registry(), data)
 
     def test_env_rejects_traversal_name(self):
         code, out = self.run_cli("_env", "../../evil")
