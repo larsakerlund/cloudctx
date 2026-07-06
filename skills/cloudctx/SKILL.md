@@ -1,6 +1,6 @@
 ---
 name: cloudctx
-description: Routes all Azure CLI work through the cloudctx tool so each customer's credentials stay isolated per context. Use whenever about to run an `az` command or act on Azure resources via CLI — az login, account/subscription selection, resource groups, VMs, AKS, app services, storage, deployments, ARM/Bicep, key vault, networking, or any `az ...` invocation. Every cloud command must run as `cloudctx exec <context> -- az ...`; never bare `az`, never `ctx use`/export then a separate `az` call. Also covers the `aws` CLI on cloudctx contexts. Do NOT use for purely conceptual or architecture Azure questions that need no CLI (e.g. "what is AKS", "App Service vs Functions", "explain managed identities").
+description: Routes all Azure CLI work through the cloudctx tool so each customer's credentials stay isolated per context. Use whenever about to run an `az` command or act on Azure resources via CLI — az login, account/subscription selection, resource groups, VMs, AKS, app services, storage, deployments, ARM/Bicep, key vault, networking, or any `az ...` invocation. Every cloud command must run as `cloudctx exec <context> -- az ...`; never bare `az`, never `cloudctx use`/export then a separate `az` call. Also covers the `aws` CLI on cloudctx contexts. Do NOT use for purely conceptual or architecture Azure questions that need no CLI (e.g. "what is AKS", "App Service vs Functions", "explain managed identities").
 ---
 
 # cloudctx — isolated Azure CLI per customer context
@@ -90,6 +90,6 @@ ambiguous, confirm WHICH before acting — never guess on a destructive op.
 ## Never
 
 - ❌ bare `az ...` — hits the global store (see above).
-- ❌ `ctx use <ctx>` then a separate `az ...` — the env dies with that shell, so the next
-  `az` has no `AZURE_CONFIG_DIR` (and `ctx use` needs a sourced shim a fresh shell may lack).
+- ❌ `cloudctx use <ctx>` then a separate `az ...` — the env dies with that shell, so the next
+  `az` has no `AZURE_CONFIG_DIR` (and `cloudctx use` needs a sourced shim a fresh shell may lack).
 - ❌ `export AZURE_CONFIG_DIR=...` then `az ...` in a later command — same reason.
