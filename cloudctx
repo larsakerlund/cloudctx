@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """cloudctx — per-window Azure/AWS CLI context isolation.
 
-A single, zero-dependency CLI. The sourced `ctx` shell shim eval's the output
-of `cloudctx _env <name>` to mutate the parent shell, and runs
-`cloudctx _decorate <name>` for iTerm2 visuals. Everything else runs here.
+A single, zero-dependency CLI. The sourced `cloudctx` shell function (which
+shadows this binary) eval's the output of `cloudctx _env <name>` to mutate the
+parent shell, and runs `cloudctx _decorate <name>` for iTerm2 visuals.
+Everything else runs here.
 
 Sections below: paths, TOML registry, color helpers, env emission,
 decorate emission, commands, argparse dispatch.
@@ -16,7 +17,10 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+__version__ = "1.3.0"
 
 ESC = "\x1b"
 BEL = "\x07"
@@ -120,19 +124,91 @@ def cmd_new(args) -> int:
     if not args.no_login:
         return cmd_login(argparse.Namespace(
             name=name, dry_run=False, device_code=getattr(args, "device_code", False)))
-    print(f"next: authenticate with  ctx login {name}")
+    print(f"next: authenticate with  cloudctx login {name}")
+    return 0
+
+
+def cmd_delete(args) -> int:
+    name = args.name
+    registry = load_registry()
+    if name not in registry:
+        return die(f"unknown context {name!r}")
+    store = context_dir(name)
+    if os.environ.get("CLOUDCTX_CONTEXT") == name:
+        print(f"cloudctx: warning: {name!r} is active in this shell — run "
+              f"`cloudctx clear` after deleting.", file=sys.stderr)
+    if not args.force:
+        what = "registry entry" if args.keep_store else \
+            f"registry entry AND credential store {store} (tokens are wiped)"
+        try:
+            reply = input(f"delete context {name!r} — {what}? [y/N] ")
+        except EOFError:
+            reply = ""
+        if reply.strip().lower() not in ("y", "yes"):
+            print("aborted — nothing deleted")
+            return 1
+    del registry[name]
+    save_registry(registry)
+    if not args.keep_store and store.exists():
+        shutil.rmtree(store)
+    try:
+        write_profiles()
+    except OSError:
+        pass  # same tolerance as cmd_new: no iTerm2 dir on a non-mac box
+    kept = f" (store kept at {store})" if args.keep_store else ""
+    print(f"deleted context {name!r}{kept}")
     return 0
 
 
 def cmd_list(args) -> int:
     registry = load_registry()
     if not registry:
-        print("no contexts. Create one with: ctx new <name>")
+        print("no contexts. Create one with: cloudctx new <name>")
         return 0
     active = os.environ.get("CLOUDCTX_CONTEXT")
+    if not getattr(args, "verbose", False):
+        for name in sorted(registry):
+            mark = "*" if name == active else " "
+            print(f"{mark} {name}")
+        return 0
+    rows = []
     for name in sorted(registry):
-        mark = "*" if name == active else " "
-        print(f"{mark} {name}")
+        entry = registry[name]
+        rows.append((
+            "*" if name == active else " ",
+            name,
+            entry.get("display", ""),
+            entry.get("azure_subscription") or entry.get("azure_tenant", ""),
+            entry.get("aws_profile", ""),
+        ))
+    headers = (" ", "NAME", "DISPLAY", "AZURE", "AWS_PROFILE")
+    widths = [max(len(r[i]) for r in rows + [headers]) for i in range(5)]
+    for row in [headers] + rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+    return 0
+
+
+def cmd_show(args) -> int:
+    registry = load_registry()
+    name = args.name
+    if name not in registry:
+        return die(f"unknown context {name!r}")
+    entry = registry[name]
+    print(f"[{name}]")
+    for key in sorted(entry):
+        print(f"{key} = {entry[key]}")
+    print()
+    az = azure_dir(name)
+    print(f"azure store:     {az}  {'(exists)' if az.is_dir() else '(missing)'}")
+    cfg, cred = aws_config(name), aws_credentials(name)
+    print(f"aws config:      {cfg}  {'(exists)' if cfg.is_file() else '(missing)'}")
+    print(f"aws credentials: {cred}  {'(exists)' if cred.is_file() else '(missing)'}")
+    return 0
+
+
+def cmd_names(args) -> int:
+    for name in sorted(load_registry()):
+        print(name)
     return 0
 
 
@@ -181,6 +257,13 @@ def _parse_value(rhs: str) -> str:
             ch = rhs[i]
             if ch == "\\" and i + 1 < len(rhs):
                 nxt = rhs[i + 1]
+                if nxt == "u" and i + 5 < len(rhs):
+                    try:
+                        out.append(chr(int(rhs[i + 2:i + 6], 16)))
+                        i += 6
+                        continue
+                    except ValueError:
+                        pass  # not 4 hex digits: fall through to literal 'u'
                 out.append({'"': '"', "\\": "\\", "n": "\n", "t": "\t",
                             "r": "\r"}.get(nxt, nxt))
                 i += 2
@@ -195,10 +278,19 @@ def _parse_value(rhs: str) -> str:
 
 
 def _escape(value: str) -> str:
-    # Must encode control chars too: a raw newline produces invalid TOML that
-    # tomllib (3.11+) rejects outright and the 3.9 fallback silently truncates.
-    return (value.replace("\\", "\\\\").replace('"', '\\"')
-            .replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r"))
+    # Must encode ALL control chars: TOML forbids them raw inside strings, so
+    # a stray BEL/ESC (or newline) would make the file unreadable to tomllib
+    # (3.11+) while the 3.9 fallback silently mangles it.
+    named = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\t": "\\t", "\r": "\\r"}
+    out = []
+    for ch in value:
+        if ch in named:
+            out.append(named[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7f:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _dump_toml(data: dict) -> str:
@@ -216,17 +308,38 @@ def load_registry() -> dict:
     if not path.exists():
         return {}
     text = path.read_text(encoding="utf-8")
-    data = _tomllib.loads(text) if _tomllib is not None else _parse_toml(text)
+    try:
+        data = _tomllib.loads(text) if _tomllib is not None else _parse_toml(text)
+    except Exception as e:
+        # A corrupt registry must fail loudly and cleanly — NOT return {}.
+        # (An empty result would let the next save_registry() rewrite the file
+        # and silently drop every other context.)
+        die(f"could not parse {path}: {e} — fix or remove that file")
+        raise SystemExit(1)
     # The registry is untrusted input (it may be hand-edited or synced). Drop any
     # table whose name isn't a safe context name, so a crafted key like
     # `[../../evil]` can never be resolved into a path outside the store.
     clean = {}
     for key, value in data.items():
-        if NAME_RE.match(key):
-            clean[key] = value
-        else:
+        if not NAME_RE.match(key):
             print(f"cloudctx: warning: ignoring invalid context name {key!r} "
                   f"in {path}", file=sys.stderr)
+            continue
+        if not isinstance(value, dict):
+            print(f"cloudctx: warning: ignoring non-table entry {key!r} "
+                  f"in {path}", file=sys.stderr)
+            continue
+        # Values reach shquote()/encode() and az argv, so only strings are
+        # usable. Drop (never coerce) anything else: a hand-edited
+        # `azure_subscription = true` must not become the subscription "True".
+        entry = {}
+        for k, v in value.items():
+            if isinstance(v, str):
+                entry[k] = v
+            else:
+                print(f"cloudctx: warning: ignoring non-string value for "
+                      f"{k!r} in [{key}] in {path}", file=sys.stderr)
+        clean[key] = entry
     return clean
 
 
@@ -322,7 +435,7 @@ def _hex6(color: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Decorate emission — raw iTerm2 escape sequences. `ctx use` runs this WITHOUT
+# Decorate emission — raw iTerm2 escape sequences. `cloudctx use` runs this WITHOUT
 # command substitution so the bytes reach the controlling tty and render.
 # Verified sequences: badge needs base64; tab color is packed hex (no '#').
 # --------------------------------------------------------------------------
@@ -401,6 +514,26 @@ def azure_login_cmds(entry, device_code=False):
     return cmds
 
 
+GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+
+
+def _verify_azure_login(name, entry, env) -> None:
+    """Post-login check: print the identity we actually landed on, and warn
+    loudly if it's a different tenant than the registry pins. Compared only
+    when both sides are GUID-shaped — a domain-form azure_tenant can't be
+    matched against the landed tenantId without a directory lookup."""
+    status, d = _probe_json(["az", "account", "show", "-o", "json"], env=env)
+    if status != "ok" or not isinstance(d, dict):
+        return  # login itself succeeded; verification is best-effort
+    print(f"logged in: {d.get('name')} ({d.get('id')})  tenant={d.get('tenantId')}")
+    want = entry.get("azure_tenant") or ""
+    got = d.get("tenantId") or ""
+    if GUID_RE.match(want) and GUID_RE.match(got) and want.lower() != got.lower():
+        print(f"cloudctx: WARNING — tenant MISMATCH: context {name!r} pins "
+              f"tenant {want} but this login landed in {got}. You may be "
+              f"authenticated against the wrong customer.", file=sys.stderr)
+
+
 def cmd_login(args) -> int:
     name = args.name
     registry = load_registry()
@@ -423,6 +556,8 @@ def cmd_login(args) -> int:
                 print("+ " + " ".join(vec))
                 if subprocess.run(vec, env=env).returncode != 0:
                     return die(f"`{' '.join(vec)}` failed")
+        if not getattr(args, "dry_run", False):
+            _verify_azure_login(name, entry, env)
     if has_aws:
         print(AWS_STUB.format(cfg=aws_config(name), cred=aws_credentials(name)))
     return 0
@@ -439,7 +574,7 @@ def cmd_exec(args) -> int:
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
     if not cmd:
-        return die("usage: ctx exec <name> -- <command> [args...]")
+        return die("usage: cloudctx exec <name> -- <command> [args...]")
     # Strip any managed vars inherited from the caller's shell before overlaying
     # this context's, so exec is fail-closed (no other context's AWS_* leaks in).
     env = {k: v for k, v in os.environ.items() if k not in CLEARABLE_VARS}
@@ -450,34 +585,64 @@ def cmd_exec(args) -> int:
         return die(f"command not found: {cmd[0]}")
 
 
+PROBE_TIMEOUT = 10.0  # seconds; a hung probe must not freeze the shell
+
+
+def _probe_timeout() -> float:
+    try:
+        return float(os.environ.get("CLOUDCTX_PROBE_TIMEOUT", PROBE_TIMEOUT))
+    except ValueError:
+        return PROBE_TIMEOUT
+
+
+def _probe_json(argv, timeout=None, env=None):
+    """Run a read-only identity probe (az/aws). Returns (status, data):
+    ("ok", parsed-json) on success, ("timeout", None) past the deadline,
+    ("error", None) for any other failure. Never raises."""
+    if timeout is None:
+        timeout = _probe_timeout()
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return "timeout", None
+    except OSError:
+        return "error", None
+    if r.returncode != 0:
+        return "error", None
+    try:
+        return "ok", json.loads(r.stdout)
+    except ValueError:
+        return "error", None
+
+
 def cmd_status(args) -> int:
     print(f"context: {os.environ.get('CLOUDCTX_CONTEXT', '(none)')}")
 
     if shutil.which("az"):
-        r = subprocess.run(["az", "account", "show", "-o", "json"],
-                           capture_output=True, text=True)
-        if r.returncode == 0:
-            try:
-                d = json.loads(r.stdout)
-                user = (d.get("user") or {}).get("name")
-                print(f"azure:   {d.get('name')} ({d.get('id')})  "
-                      f"tenant={d.get('tenantId')}  user={user}")
-            except (ValueError, AttributeError):
-                print("azure:   (could not parse `az account show`)")
+        status, d = _probe_json(["az", "account", "show", "-o", "json"])
+        if status == "ok" and isinstance(d, dict):
+            user = (d.get("user") or {}).get("name")
+            print(f"azure:   {d.get('name')} ({d.get('id')})  "
+                  f"tenant={d.get('tenantId')}  user={user}")
+        elif status == "ok":
+            print("azure:   (could not parse `az account show`)")
+        elif status == "timeout":
+            print("azure:   (timed out — network/VPN down?)")
         else:
-            print("azure:   not logged in (run: ctx login <name>)")
+            print("azure:   not logged in (run: cloudctx login <name>)")
     else:
         print("azure:   az CLI not installed")
 
     if shutil.which("aws"):
-        r = subprocess.run(["aws", "sts", "get-caller-identity", "--output", "json"],
-                           capture_output=True, text=True)
-        if r.returncode == 0:
-            try:
-                d = json.loads(r.stdout)
-                print(f"aws:     account={d.get('Account')}  arn={d.get('Arn')}")
-            except (ValueError, AttributeError):
-                print("aws:     (could not parse caller identity)")
+        status, d = _probe_json(["aws", "sts", "get-caller-identity",
+                                 "--output", "json"])
+        if status == "ok" and isinstance(d, dict):
+            print(f"aws:     account={d.get('Account')}  arn={d.get('Arn')}")
+        elif status == "ok":
+            print("aws:     (could not parse caller identity)")
+        elif status == "timeout":
+            print("aws:     (timed out — network/VPN down?)")
         else:
             print("aws:     not authenticated")
     else:
@@ -495,7 +660,7 @@ def applescript_escape(s: str) -> str:
 
 
 def build_open_command(name: str, cd=None, claude=False) -> str:
-    parts = [f"ctx use {name}"]
+    parts = [f"cloudctx use {name}"]
     if cd:
         parts.append(f"cd {shquote(cd)}")
     if claude:
@@ -541,7 +706,7 @@ def cmd_open(args) -> int:
         print("\n".join(argv))
         return 0
     if not shutil.which("osascript"):
-        return die("osascript not found — `ctx open` needs macOS + iTerm2")
+        return die("osascript not found — `cloudctx open` needs macOS + iTerm2")
     return subprocess.run(argv).returncode
 
 
@@ -572,7 +737,7 @@ def build_profiles(registry: dict) -> dict:
         prof = {
             "Name": f"{display} (ctx)",
             "Guid": f"cloudctx-{name}",  # stable across regenerations
-            "Initial Text": f"ctx use {name}",
+            "Initial Text": f"cloudctx use {name}",
             "Custom Command": "No",
             "Command": "",
         }
@@ -616,10 +781,14 @@ def script_dir() -> Path:
 def cmd_install(args) -> int:
     requested = args.shell or os.path.basename(os.environ.get("SHELL", "zsh"))
     shell = "bash" if "bash" in requested else "zsh"
-    shim = script_dir() / "shell" / f"ctx.{shell}"
+    shim = script_dir() / "shell" / f"cloudctx.{shell}"
     rc = Path.home() / (".bashrc" if shell == "bash" else ".zshrc")
     line = f"source {shim}"
     if args.write:
+        existing = rc.read_text(encoding="utf-8") if rc.exists() else ""
+        if line in existing:
+            print(f"already installed in {rc} — nothing to do.")
+            return 0
         with open(rc, "a", encoding="utf-8") as f:
             f.write(f"\n# cloudctx\n{line}\n")
         print(f"appended to {rc}:\n  {line}\nOpen a new shell to activate.")
@@ -632,14 +801,219 @@ def cmd_install(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# self-update — the install is a git clone (binary symlinked out of it), so
+# git is the update channel and vX.Y.Z tags are the versioning. --check is
+# passive and explicit-only: no command ever phones home on its own.
+# --------------------------------------------------------------------------
+TAG_RE = re.compile(r"refs/tags/v?(\d+)\.(\d+)\.(\d+)$")
+
+
+def _git(install_dir, *args, timeout=30):
+    """Run git in the install dir; None on timeout/missing git (never raise)."""
+    try:
+        return subprocess.run(["git", "-C", str(install_dir), *args],
+                              capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _latest_remote_version(install_dir):
+    """Highest vX.Y.Z tag on origin, as an int tuple — or None if unknowable."""
+    r = _git(install_dir, "ls-remote", "--tags", "origin", timeout=20)
+    if r is None or r.returncode != 0:
+        return None
+    best = None
+    for line in r.stdout.splitlines():
+        m = TAG_RE.search(line.strip())
+        if m:
+            v = tuple(int(x) for x in m.groups())
+            if best is None or v > best:
+                best = v
+    return best
+
+
+def cmd_self_update(args) -> int:
+    install = script_dir()
+    if not (install / ".git").exists():
+        return die(f"{install} is not a git clone — update it the same way "
+                   f"it was installed")
+
+    if args.check:
+        latest = _latest_remote_version(install)
+        if latest is None:
+            return die("could not read tags from origin (offline? no tags?)")
+        latest_s = ".".join(map(str, latest))
+        current = tuple(int(x) for x in __version__.split("."))
+        if latest > current:
+            print(f"update available: {__version__} -> {latest_s} "
+                  f"(run: cloudctx self-update)")
+        else:
+            print(f"up to date: {__version__} (latest tag: v{latest_s})")
+        return 0
+
+    r = _git(install, "status", "--porcelain")
+    if r is None or r.returncode != 0:
+        return die(f"could not run git in {install}")
+    if r.stdout.strip():
+        return die(f"local changes in {install} — commit or stash them first; "
+                   f"self-update never discards your edits")
+    before = (_git(install, "rev-parse", "HEAD") or r).stdout.strip()
+    pull = _git(install, "pull", "--ff-only", timeout=120)
+    if pull is None or pull.returncode != 0:
+        detail = pull.stderr.strip() if pull else "timed out"
+        return die(f"git pull --ff-only failed: {detail}")
+    after = (_git(install, "rev-parse", "HEAD") or pull).stdout.strip()
+    if before == after:
+        print(f"already up to date ({__version__})")
+        return 0
+
+    # Ask the NEW code for its version and let IT regenerate the iTerm2
+    # profiles — this running process still has the old logic in memory.
+    binpath = install / "cloudctx"
+    new_version = "?"
+    r = subprocess.run([sys.executable, str(binpath), "--version"],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        new_version = r.stdout.strip().replace("cloudctx ", "")
+    subprocess.run([sys.executable, str(binpath), "gen-profiles"],
+                   capture_output=True, text=True)  # tolerated on non-mac
+
+    print(f"updated: {__version__} -> {new_version} "
+          f"({before[:7]} -> {after[:7]})")
+    print("open a new shell (or re-source the shim) to finish.")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Passive update notice. Interactive commands read a cached latest-version
+# marker and print a one-liner to stderr (TTY only); a detached background
+# refresh keeps the cache warm at most once per day via `git ls-remote` —
+# no foreground command ever waits on the network. Opt out:
+# CLOUDCTX_NO_UPDATE_CHECK=1.
+# --------------------------------------------------------------------------
+UPDATE_CHECK_INTERVAL = 24 * 3600  # seconds
+
+# Commands that may carry the notice. NEVER _env (stdout is eval'd by the
+# shim), _decorate (raw escape bytes), _names (machine-parsed), or exec
+# (script noise). self-update reports versions itself.
+NOTIFY_COMMANDS = {"list", "show", "status", "login", "new", "delete",
+                   "open", "claude", "gen-profiles", "install"}
+
+
+def _update_state_path() -> Path:
+    return REGISTRY_ROOT() / ".update-check.json"
+
+
+def _read_update_state() -> dict:
+    try:
+        data = json.loads(_update_state_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _parse_version(s):
+    try:
+        return tuple(int(x) for x in str(s).split("."))
+    except ValueError:
+        return None
+
+
+def _spawn_update_refresh() -> None:
+    """Fire-and-forget cache refresh in a detached child process."""
+    try:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()),
+             "_refresh-update-check"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+    except OSError:
+        pass
+
+
+def cmd_refresh_update_check(args) -> int:
+    """(internal) refresh the cached latest-version marker (network)."""
+    latest = _latest_remote_version(script_dir())
+    state = _read_update_state()
+    state["checked_at"] = int(time.time())  # stamp even on failure: throttles
+    if latest is not None:                  # offline retries to once per day
+        state["latest"] = ".".join(map(str, latest))
+    root = REGISTRY_ROOT()
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = _update_state_path().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state), encoding="utf-8")
+    os.replace(tmp, _update_state_path())
+    return 0 if latest is not None else 1
+
+
+def _maybe_notify_update(stream=None) -> None:
+    if os.environ.get("CLOUDCTX_NO_UPDATE_CHECK"):
+        return
+    stream = sys.stderr if stream is None else stream
+    if not getattr(stream, "isatty", lambda: False)():
+        return
+    state = _read_update_state()
+    latest = _parse_version(state.get("latest", ""))
+    current = _parse_version(__version__)
+    if latest and current and latest > current:
+        latest_s = ".".join(map(str, latest))
+        print(f"cloudctx: new version available: {__version__} -> {latest_s}"
+              f" — to install, run 'cloudctx self-update'", file=stream)
+    age = int(time.time()) - int(state.get("checked_at", 0) or 0)
+    if age >= UPDATE_CHECK_INTERVAL and (script_dir() / ".git").exists():
+        _spawn_update_refresh()
+
+
+# --------------------------------------------------------------------------
+# use/clear stubs — the sourced shell function intercepts these before the
+# binary ever sees them (a child process can't export into its parent). If
+# they reach us, the shim isn't loaded; explain instead of an argparse error.
+# --------------------------------------------------------------------------
+def cmd_use_stub(args) -> int:
+    return die("`cloudctx use`/`cloudctx clear` need the sourced shell "
+               "function, which isn't loaded in this shell. Run "
+               "`cloudctx install --write` and open a new shell.")
+
+
+# --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="cloudctx", description=__doc__.splitlines()[0])
+    p.add_argument("--version", action="version",
+                   version=f"cloudctx {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
     p_list = sub.add_parser("list", help="list contexts; mark the active one")
+    p_list.add_argument("-v", "--verbose", action="store_true",
+                        help="show display/azure/aws columns")
     p_list.set_defaults(func=cmd_list)
+
+    p_show = sub.add_parser("show", help="show a context's registry entry + store paths")
+    p_show.add_argument("name")
+    p_show.set_defaults(func=cmd_show)
+
+    p_names = sub.add_parser("_names", help="(internal) bare context names, for completion")
+    p_names.set_defaults(func=cmd_names)
+
+    p_refresh = sub.add_parser("_refresh-update-check",
+                               help="(internal) refresh the cached latest-version marker")
+    p_refresh.set_defaults(func=cmd_refresh_update_check)
+
+    p_del = sub.add_parser("delete", help="delete a context (registry entry + credential store)")
+    p_del.add_argument("name")
+    p_del.add_argument("--force", action="store_true",
+                       help="skip the confirmation prompt")
+    p_del.add_argument("--keep-store", dest="keep_store", action="store_true",
+                       help="remove only the registry entry; keep ~/.cloudctx/<name>/")
+    p_del.set_defaults(func=cmd_delete)
+
+    # Intercepted by the sourced shell function; stubs for shim-less shells.
+    p_use = sub.add_parser("use", help="select a context in this shell (needs the sourced shim)")
+    p_use.add_argument("name", nargs="?")
+    p_use.set_defaults(func=cmd_use_stub)
+    p_clear = sub.add_parser("clear", help="deselect the context (needs the sourced shim)")
+    p_clear.set_defaults(func=cmd_use_stub)
 
     p_new = sub.add_parser("new", help="scaffold a context + registry entry")
     p_new.add_argument("name")
@@ -710,6 +1084,12 @@ def build_parser() -> argparse.ArgumentParser:
                            help="regenerate the iTerm2 dynamic profiles file")
     p_gen.set_defaults(func=cmd_gen_profiles)
 
+    p_up = sub.add_parser("self-update",
+                          help="update the install (git pull) + regen profiles")
+    p_up.add_argument("--check", action="store_true",
+                      help="only report whether a newer tag exists on origin")
+    p_up.set_defaults(func=cmd_self_update)
+
     p_install = sub.add_parser("install", help="print/write the shell-rc source line")
     p_install.add_argument("--shell", choices=["zsh", "bash"],
                            help="target shell (default: from $SHELL)")
@@ -723,7 +1103,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    code = args.func(args)
+    if args.command in NOTIFY_COMMANDS:
+        _maybe_notify_update()
+    return code
 
 
 if __name__ == "__main__":

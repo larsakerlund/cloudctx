@@ -1,4 +1,4 @@
-"""Tests for the sourced shell shims (shell/ctx.zsh, shell/ctx.bash).
+"""Tests for the sourced shell shims (shell/cloudctx.zsh, shell/cloudctx.bash).
 
 These drive real zsh/bash subprocesses, so they're skipped when the shell
 isn't installed. A throwaway $CLOUDCTX_HOME and a stubbed `cloudctx` on PATH
@@ -48,17 +48,17 @@ class TestShimZsh(unittest.TestCase):
                        env=self.env, check=True, capture_output=True)
 
     def run_script(self, body):
-        script = f"source {ROOT}/shell/ctx.{self.shell}\n" + textwrap.dedent(body)
+        script = f"source {ROOT}/shell/cloudctx.{self.shell}\n" + textwrap.dedent(body)
         r = subprocess.run([self.shell, self.rcflag, "-c", script],
                            env=self.env, capture_output=True, text=True)
         return r
 
     def test_use_sets_env(self):
         r = self.run_script(f'''
-            ctx use acme >/dev/null
+            cloudctx use acme >/dev/null
             print -r -- "{MARK}$CLOUDCTX_CONTEXT|$AZURE_CONFIG_DIR"
         ''' if self.shell == "zsh" else f'''
-            ctx use acme >/dev/null
+            cloudctx use acme >/dev/null
             echo "{MARK}$CLOUDCTX_CONTEXT|$AZURE_CONFIG_DIR"
         ''')
         val = extract(r.stdout)
@@ -70,8 +70,8 @@ class TestShimZsh(unittest.TestCase):
     def test_clear_unsets_context(self):
         echo = "print -r --" if self.shell == "zsh" else "echo"
         r = self.run_script(f'''
-            ctx use acme >/dev/null
-            ctx clear >/dev/null
+            cloudctx use acme >/dev/null
+            cloudctx clear >/dev/null
             {echo} "{MARK}[$CLOUDCTX_CONTEXT]"
         ''')
         val = extract(r.stdout)
@@ -80,9 +80,9 @@ class TestShimZsh(unittest.TestCase):
     def test_unknown_subcommand_delegates_to_binary(self):
         echo = "print -r --" if self.shell == "zsh" else "echo"
         r = self.run_script(f'''
-            ctx list >/tmp/cctx_list_$$ 2>&1
-            {echo} "{MARK}$(grep -c acme /tmp/cctx_list_$$)"
-            rm -f /tmp/cctx_list_$$
+            cloudctx list >/tmp/cloudctx_list_$$ 2>&1
+            {echo} "{MARK}$(grep -c acme /tmp/cloudctx_list_$$)"
+            rm -f /tmp/cloudctx_list_$$
         ''')
         self.assertEqual(extract(r.stdout), "1", msg=r.stderr)
 
@@ -90,18 +90,18 @@ class TestShimZsh(unittest.TestCase):
     pvar = "PROMPT"
 
     def test_guard_warns_without_context(self):
-        r = self.run_script('_cctx_guard az')
+        r = self.run_script('_cloudctx_guard az')
         self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
 
     def test_guard_silent_with_context(self):
         r = self.run_script('''
-            ctx use acme >/dev/null
-            _cctx_guard az
+            cloudctx use acme >/dev/null
+            _cloudctx_guard az
         ''')
         self.assertNotIn("no context", r.stderr.lower(), msg=r.stderr)
 
     def test_guard_ignores_non_cloud_commands(self):
-        r = self.run_script('_cctx_guard ls')
+        r = self.run_script('_cloudctx_guard ls')
         self.assertEqual(r.stderr.strip(), "", msg=r.stderr)
 
     def test_prompt_has_context_segment(self):
@@ -127,8 +127,8 @@ class TestShimZsh(unittest.TestCase):
         self._new("awsctx", "--aws-profile", "awsctx")
         echo = "print -r --" if self.shell == "zsh" else "echo"
         r = self.run_script(f'''
-            ctx use awsctx >/dev/null
-            ctx use acme >/dev/null
+            cloudctx use awsctx >/dev/null
+            cloudctx use acme >/dev/null
             {echo} "{MARK}[$CLOUDCTX_CONTEXT|$AWS_PROFILE|$CLOUDCTX_AZURE_LABEL]"
         ''')
         self.assertEqual(extract(r.stdout), "[acme||Prod]", msg=r.stderr)
@@ -138,20 +138,56 @@ class TestShimZsh(unittest.TestCase):
         self._new("bare", "--azure-tenant", "t2")
         echo = "print -r --" if self.shell == "zsh" else "echo"
         r = self.run_script(f'''
-            ctx use acme >/dev/null
-            ctx use bare >/dev/null
+            cloudctx use acme >/dev/null
+            cloudctx use bare >/dev/null
             {echo} "{MARK}[$CLOUDCTX_CONTEXT|$CLOUDCTX_AZURE_LABEL]"
         ''')
         self.assertEqual(extract(r.stdout), "[bare|]", msg=r.stderr)
 
+    def test_guard_catches_compound_and(self):
+        # Review 2026-07-06 #1: `cd x && az login` must still warn.
+        r = self.run_script('_cloudctx_guard "cd /tmp && az login"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_catches_pipeline(self):
+        r = self.run_script('_cloudctx_guard "echo hi | aws s3 ls"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_catches_semicolon(self):
+        r = self.run_script('_cloudctx_guard "true; az account show"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_catches_or_list(self):
+        r = self.run_script('_cloudctx_guard "false || az login"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_catches_stdbuf_flags(self):
+        # Review 2026-07-06 #5: wrapper flags (`stdbuf -oL az`) must be skipped.
+        r = self.run_script('_cloudctx_guard "stdbuf -oL az login"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_silent_on_compound_without_cloud_cmds(self):
+        r = self.run_script('_cloudctx_guard "ls -la && echo done | wc -l"')
+        self.assertEqual(r.stderr.strip(), "", msg=r.stderr)
+
+    def test_guard_ignores_separators_inside_quotes(self):
+        # A quoted argument containing `&& az ...` is data, not a command.
+        r = self.run_script(
+            "_cloudctx_guard 'git commit -m \"wire up && az login flow\"'")
+        self.assertEqual(r.stderr.strip(), "", msg=r.stderr)
+
+    def test_guard_catches_unspaced_separators(self):
+        r = self.run_script("_cloudctx_guard 'cd /tmp&&az login'")
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
     def test_guard_strips_wrappers(self):
         # Finding #15: `sudo az ...` should still trigger the guard.
-        r = self.run_script('_cctx_guard "sudo az login"')
+        r = self.run_script('_cloudctx_guard "sudo az login"')
         self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
 
     def test_guard_strips_assignments(self):
         # Finding #15: leading VAR=val assignments should be skipped.
-        r = self.run_script('_cctx_guard "FOO=bar aws s3 ls"')
+        r = self.run_script('_cloudctx_guard "FOO=bar aws s3 ls"')
         self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
 
     def test_zsh_prompt_escapes_percent(self):
@@ -172,6 +208,41 @@ class TestShimZsh(unittest.TestCase):
         ''')
         self.assertEqual(extract(r.stdout), "yes|100%n", msg=r.stderr)
 
+    def test_completion_registered(self):
+        if self.shell == "zsh":
+            # compdef only exists after compinit; stub it to test registration
+            # hermetically, then assert our completer function is defined and
+            # was registered for the `cloudctx` command.
+            script = (
+                "compdef() { CCTX_REG=\"$*\"; }\n"
+                f"source {ROOT}/shell/cloudctx.zsh\n"
+                'print -r -- "CCTX=${+functions[_cloudctx]}|$CCTX_REG"\n'
+            )
+            r = subprocess.run(["zsh", "-f", "-c", script],
+                               env=self.env, capture_output=True, text=True)
+            self.assertEqual(extract(r.stdout), "1|_cloudctx cloudctx",
+                             msg=r.stderr)
+        else:
+            script = (f"source {ROOT}/shell/cloudctx.bash\n"
+                      'echo "CCTX=$(complete -p cloudctx 2>/dev/null)"\n')
+            r = subprocess.run(["bash", "--norc", "--noprofile", "-c", script],
+                               env=self.env, capture_output=True, text=True)
+            self.assertIn("_cloudctx_complete", extract(r.stdout) or "",
+                          msg=r.stderr)
+
+    def test_bash_completion_suggests_context_names(self):
+        if self.shell != "bash":
+            self.skipTest("bash completion internals")
+        script = (
+            f"source {ROOT}/shell/cloudctx.bash\n"
+            'COMP_WORDS=(cloudctx use ""); COMP_CWORD=2\n'
+            "_cloudctx_complete\n"
+            'echo "CCTX=${COMPREPLY[*]}"\n'
+        )
+        r = subprocess.run(["bash", "--norc", "--noprofile", "-c", script],
+                           env=self.env, capture_output=True, text=True)
+        self.assertIn("acme", extract(r.stdout) or "", msg=r.stderr)
+
     def test_bash_guard_composes_with_bash_preexec(self):
         # Finding #8 (coexistence): when bash-preexec is present, register as a
         # preexec function and DON'T seize the DEBUG trap, so other hooks survive.
@@ -180,20 +251,20 @@ class TestShimZsh(unittest.TestCase):
         script = (
             "preexec_functions=()\n"           # simulate bash-preexec being loaded
             "trap 'echo PRIOR' DEBUG\n"        # a pre-existing DEBUG trap
-            f"source {ROOT}/shell/ctx.bash\n"
+            f"source {ROOT}/shell/cloudctx.bash\n"
             'echo "CCTX=$(declare -p preexec_functions)|$(trap -p DEBUG)"\n'
         )
         r = subprocess.run([self.shell, "--norc", "--noprofile", "-c", script],
                            env=self.env, capture_output=True, text=True)
         val = extract(r.stdout) or ""
-        self.assertIn("_cctx_bp_preexec", val, msg=r.stderr)   # we registered
+        self.assertIn("_cloudctx_bp_preexec", val, msg=r.stderr)   # we registered
         self.assertIn("echo PRIOR", val, msg="our shim clobbered the DEBUG trap")
 
     def test_bash_guard_installs_trap_without_preexec(self):
         # Finding #8 (fallback): on plain bash the guard still installs.
         if self.shell != "bash":
             self.skipTest("bash-specific guard registration")
-        script = (f"source {ROOT}/shell/ctx.bash\n"
+        script = (f"source {ROOT}/shell/cloudctx.bash\n"
                   'echo "CCTX=$(trap -p DEBUG)"\n')
         r = subprocess.run([self.shell, "--norc", "--noprofile", "-c", script],
                            env=self.env, capture_output=True, text=True)
@@ -207,7 +278,7 @@ class TestShimBash(TestShimZsh):
     pvar = "PS1"
 
     def run_script(self, body):
-        script = f"source {ROOT}/shell/ctx.{self.shell}\n" + textwrap.dedent(body)
+        script = f"source {ROOT}/shell/cloudctx.{self.shell}\n" + textwrap.dedent(body)
         r = subprocess.run([self.shell, "--norc", "--noprofile", "-c", script],
                            env=self.env, capture_output=True, text=True)
         return r

@@ -9,10 +9,12 @@ dir through $CLOUDCTX_HOME so nothing touches the real ~/.cloudctx.
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
@@ -67,6 +69,43 @@ class TestList(Base):
         code, out = self.run_cli("list")
         self.assertEqual(code, 0)
         self.assertIn("no contexts", out.lower())
+
+
+class TestListVerboseShowNames(Base):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("new", "acme", "--display", "Acme AB",
+                     "--azure-tenant", "t-1", "--azure-subscription", "Prod Sub",
+                     "--no-login")
+        self.run_cli("new", "globex", "--aws-profile", "globex-ops", "--no-login")
+
+    def test_list_verbose_columns(self):
+        code, out = self.run_cli("list", "-v")
+        self.assertEqual(code, 0)
+        self.assertIn("Acme AB", out)
+        self.assertIn("Prod Sub", out)
+        self.assertIn("globex-ops", out)
+
+    def test_list_plain_output_unchanged(self):
+        code, out = self.run_cli("list")
+        self.assertEqual(code, 0)
+        self.assertNotIn("Acme AB", out)  # plain list stays terse
+
+    def test_show_prints_entry_and_paths(self):
+        code, out = self.run_cli("show", "acme")
+        self.assertEqual(code, 0)
+        self.assertIn("display = Acme AB", out)
+        self.assertIn("azure_subscription = Prod Sub", out)
+        self.assertIn(str(self.cc.azure_dir("acme")), out)
+
+    def test_show_unknown_context(self):
+        code, out = self.run_cli("show", "ghost")
+        self.assertNotEqual(code, 0)
+
+    def test_names_prints_bare_names(self):
+        code, out = self.run_cli("_names")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.split(), ["acme", "globex"])
 
 
 class TestRegistry(Base):
@@ -287,6 +326,44 @@ class TestExecStatus(Base):
         self.assertIn("me@example.com", r.stdout)
 
 
+class TestProbe(Base):
+    """_probe_json: the timeout-guarded identity probe used by status/login."""
+
+    def test_probe_ok(self):
+        status, data = self.cc._probe_json(
+            ["sh", "-c", 'echo \'{"name": "x"}\''])
+        self.assertEqual(status, "ok")
+        self.assertEqual(data, {"name": "x"})
+
+    def test_probe_error_on_nonzero_exit(self):
+        status, data = self.cc._probe_json(["sh", "-c", "exit 1"])
+        self.assertEqual((status, data), ("error", None))
+
+    def test_probe_timeout(self):
+        status, data = self.cc._probe_json(["sleep", "5"], timeout=0.2)
+        self.assertEqual((status, data), ("timeout", None))
+
+    def test_probe_unparsable_output(self):
+        status, data = self.cc._probe_json(["sh", "-c", "echo not-json"])
+        self.assertEqual((status, data), ("error", None))
+
+    def test_status_reports_timeout_not_hang(self):
+        # Review 2026-07-06 #4: a hanging az must surface as a message, fast.
+        self.run_cli("new", "acme", "--azure-tenant", "t", "--no-login")
+        stubdir = tempfile.mkdtemp(prefix="stub-")
+        self.addCleanup(shutil.rmtree, stubdir, ignore_errors=True)
+        write_stub(stubdir, "az", "sleep 30")
+        write_stub(stubdir, "aws", "exit 1")
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        env["CLOUDCTX_PROBE_TIMEOUT"] = "0.2"
+        env["PATH"] = stubdir + os.pathsep + env["PATH"]
+        r = subprocess.run([CLI, "status"], env=env, capture_output=True,
+                           text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("timed out", r.stdout)
+
+
 class TestLogin(Base):
     def test_azure_login_cmds(self):
         entry = {"azure_tenant": "t", "azure_subscription": "s"}
@@ -315,30 +392,68 @@ class TestLogin(Base):
         code, out = self.run_cli("login", "ghost", "--dry-run")
         self.assertNotEqual(code, 0)
 
+    GUID = "9fc151d1-62b8-402f-b07e-91533ff07e0d"
+
+    def _login_with_stub_az(self, registry_tenant, landed_tenant):
+        self.run_cli("new", "acme", "--azure-tenant", registry_tenant,
+                     "--no-login")
+        stubdir = tempfile.mkdtemp(prefix="stub-")
+        self.addCleanup(shutil.rmtree, stubdir, ignore_errors=True)
+        write_stub(
+            stubdir, "az",
+            'case "$1 $2" in\n'
+            '"account show") echo \'{"name":"Sub","id":"s-1",'
+            f'"tenantId":"{landed_tenant}"}}\' ;;\n'
+            '*) exit 0 ;;\n'
+            'esac')
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        env["PATH"] = stubdir + os.pathsep + env["PATH"]
+        return subprocess.run([CLI, "login", "acme"], env=env,
+                              capture_output=True, text=True)
+
+    def test_login_verifies_matching_tenant_quietly(self):
+        r = self._login_with_stub_az(self.GUID, self.GUID)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("logged in:", r.stdout)
+        self.assertNotIn("MISMATCH", r.stderr)
+
+    def test_login_warns_on_guid_tenant_mismatch(self):
+        other = "00000000-0000-0000-0000-000000000000"
+        r = self._login_with_stub_az(self.GUID, other)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)  # login itself succeeded
+        self.assertIn("MISMATCH", r.stderr)
+
+    def test_login_skips_comparison_for_domain_tenant(self):
+        # domain-form tenants can't be compared to the landed GUID — no warning
+        r = self._login_with_stub_az("contoso.onmicrosoft.com", self.GUID)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertNotIn("MISMATCH", r.stderr)
+
 
 class TestOpen(Base):
     def test_applescript_escape(self):
         self.assertEqual(self.cc.applescript_escape('a"b\\c'), 'a\\"b\\\\c')
 
     def test_open_argv_new_window(self):
-        argv = self.cc.open_osascript_argv("ctx use acme", tab=False)
+        argv = self.cc.open_osascript_argv("cloudctx use acme", tab=False)
         self.assertEqual(argv[0], "osascript")
         self.assertIn("set _w to (create window with default profile)", argv)
-        self.assertIn('write text "ctx use acme"', argv)
+        self.assertIn('write text "cloudctx use acme"', argv)
 
     def test_open_argv_new_tab(self):
-        argv = self.cc.open_osascript_argv("ctx use acme", tab=True)
+        argv = self.cc.open_osascript_argv("cloudctx use acme", tab=True)
         self.assertIn("set _t to (create tab with default profile)", argv)
 
     def test_build_open_command_cd_and_claude(self):
         cmd = self.cc.build_open_command("acme", cd="/x", claude=True)
-        self.assertEqual(cmd, "ctx use acme && cd '/x' && claude")
+        self.assertEqual(cmd, "cloudctx use acme && cd '/x' && claude")
 
     def test_open_dry_run(self):
         self.run_cli("new", "acme", "--no-login")
         code, out = self.run_cli("open", "acme", "--dry-run")
         self.assertEqual(code, 0)
-        self.assertIn('write text "ctx use acme"', out)
+        self.assertIn('write text "cloudctx use acme"', out)
 
     def test_claude_dry_run_includes_claude(self):
         self.run_cli("new", "acme", "--no-login")
@@ -354,7 +469,7 @@ class TestProfiles(Base):
         self.assertEqual(len(prof["Profiles"]), 1)
         p = prof["Profiles"][0]
         self.assertEqual(p["Guid"], "cloudctx-acme")
-        self.assertEqual(p["Initial Text"], "ctx use acme")
+        self.assertEqual(p["Initial Text"], "cloudctx use acme")
         self.assertTrue(p["Use Tab Color"])
         self.assertAlmostEqual(p["Tab Color"]["Red Component"], 192 / 255)
         self.assertEqual(p["Tab Color"]["Color Space"], "sRGB")
@@ -398,13 +513,46 @@ class TestReviewFixes(Base):
 
     def test_load_registry_drops_traversal_names(self):
         # Finding #1: a hand-edited registry with a path-traversal table name
-        # must not become a usable context.
+        # must not become a usable context. Quoted-key form, which is valid
+        # TOML — both tomllib and the fallback parse it, then the name filter
+        # must drop it.
         Path(self.cc.registry_path()).parent.mkdir(parents=True, exist_ok=True)
         Path(self.cc.registry_path()).write_text(
-            '[acme]\ndisplay = "Acme"\n\n[../../evil]\ndisplay = "Evil"\n')
+            '[acme]\ndisplay = "Acme"\n\n["../../evil"]\ndisplay = "Evil"\n')
         reg = self.cc.load_registry()
         self.assertIn("acme", reg)
         self.assertNotIn("../../evil", reg)
+        self.assertNotIn('"../../evil"', reg)
+
+    def test_unparsable_registry_fails_cleanly(self):
+        # 3.13 regression (this branch): a bare `[../../evil]` header is
+        # INVALID TOML — tomllib must produce a clean error, never a traceback
+        # (and never an empty registry, which a later save would persist).
+        # The 3.9 fallback is lenient and drops the bad table instead.
+        Path(self.cc.registry_path()).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.cc.registry_path()).write_text(
+            '[acme]\ndisplay = "Acme"\n\n[../../evil]\ndisplay = "Evil"\n')
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        # run under THIS interpreter so the tomllib branch below matches the
+        # parser the subprocess actually used (the shebang may be older).
+        r = subprocess.run([sys.executable, CLI, "list"], env=env,
+                           capture_output=True, text=True)
+        self.assertNotIn("Traceback", r.stderr)
+        if self.cc._tomllib is not None:
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("could not parse", r.stderr)
+        else:
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            self.assertIn("acme", r.stdout)
+
+    def test_control_chars_in_values_roundtrip(self):
+        # 3.13 regression (this branch): _escape must encode BEL/ESC etc. as
+        # \uXXXX — raw control chars are invalid TOML and locked tomllib out
+        # of the registry entirely.
+        data = {"x": {"display": "Acme\x07\x1b]0;HIJACK\x07"}}
+        self.cc.save_registry(data)
+        self.assertEqual(self.cc.load_registry(), data)
 
     def test_env_rejects_traversal_name(self):
         code, out = self.run_cli("_env", "../../evil")
@@ -452,6 +600,22 @@ class TestReviewFixes(Base):
         self.assertEqual(r.returncode, 0, msg=r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
+    def test_load_registry_drops_non_string_values(self):
+        # Review 2026-07-06 #2: a hand-edited `flag = true` parses to a bool
+        # under tomllib (3.11+) and must never reach shquote/encode — and must
+        # not be coerced (bool True must not become subscription "True").
+        Path(self.cc.registry_path()).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.cc.registry_path()).write_text(
+            '[acme]\ndisplay = "Acme"\nflag = true\ncount = 3\n')
+        reg = self.cc.load_registry()
+        for entry in reg.values():
+            for v in entry.values():
+                self.assertIsInstance(v, str)
+        # _env must exit cleanly on such a context, not traceback.
+        code, out = self.run_cli("_env", "acme")
+        self.assertEqual(code, 0)
+        self.assertIn("export CLOUDCTX_CONTEXT='acme'", out)
+
     def test_permissions_locked_down(self):
         # Finding #9: registry root 0700, contexts.toml 0600, stores 0700.
         self.run_cli("new", "acme", "--no-login")
@@ -460,16 +624,185 @@ class TestReviewFixes(Base):
         self.assertEqual(stat.S_IMODE(os.stat(self.cc.azure_dir("acme")).st_mode), 0o700)
 
 
+class TestSelfUpdate(Base):
+    """self-update against a local fixture remote — hermetic, no network."""
+
+    def _git(self, cwd, *args):
+        return subprocess.run(
+            ["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t",
+             *args], capture_output=True, text=True, check=True)
+
+    def _fixture(self):
+        """A 'remote' repo holding the real CLI file, and an install clone."""
+        remote = Path(tempfile.mkdtemp(prefix="cctx-remote-"))
+        self.addCleanup(shutil.rmtree, remote, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", str(remote)],
+                       check=True, capture_output=True)
+        shutil.copy(CLI, remote / "cloudctx")
+        self._git(remote, "add", "-A")
+        self._git(remote, "commit", "-qm", "initial")
+        parent = Path(tempfile.mkdtemp(prefix="cctx-install-"))
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        install = parent / "clone"
+        subprocess.run(["git", "clone", "-q", str(remote), str(install)],
+                       check=True, capture_output=True)
+        self.cc.script_dir = lambda: install
+        return remote, install
+
+    def _bump_remote(self, remote, version):
+        text = (remote / "cloudctx").read_text()
+        text = text.replace(f'__version__ = "{self.cc.__version__}"',
+                            f'__version__ = "{version}"')
+        (remote / "cloudctx").write_text(text)
+        self._git(remote, "commit", "-aqm", f"bump {version}")
+
+    def test_check_reports_update_available(self):
+        remote, install = self._fixture()
+        self._git(remote, "tag", "v9.9.9")
+        code, out = self.run_cli("self-update", "--check")
+        self.assertEqual(code, 0)
+        self.assertIn("update available", out)
+        self.assertIn("9.9.9", out)
+
+    def test_check_reports_up_to_date(self):
+        remote, install = self._fixture()
+        self._git(remote, "tag", f"v{self.cc.__version__}")
+        code, out = self.run_cli("self-update", "--check")
+        self.assertEqual(code, 0)
+        self.assertIn("up to date", out)
+
+    def test_update_pulls_and_reports_versions(self):
+        remote, install = self._fixture()
+        self._bump_remote(remote, "9.9.9")
+        code, out = self.run_cli("self-update")
+        self.assertEqual(code, 0, msg=out)
+        self.assertIn("updated:", out)
+        self.assertIn("9.9.9", out)
+        self.assertIn("new shell", out)
+        self.assertIn('__version__ = "9.9.9"',
+                      (install / "cloudctx").read_text())
+
+    def test_update_already_up_to_date(self):
+        remote, install = self._fixture()
+        code, out = self.run_cli("self-update")
+        self.assertEqual(code, 0, msg=out)
+        self.assertIn("already up to date", out)
+
+    def test_update_refuses_dirty_tree(self):
+        remote, install = self._fixture()
+        self._bump_remote(remote, "9.9.9")
+        with open(install / "cloudctx", "a") as f:
+            f.write("# local edit\n")
+        code, out = self.run_cli("self-update")
+        self.assertNotEqual(code, 0)
+        self.assertIn("local changes", out)
+        # nothing was pulled
+        self.assertNotIn('__version__ = "9.9.9"',
+                         (install / "cloudctx").read_text())
+
+    def test_update_refuses_non_clone(self):
+        plain = Path(tempfile.mkdtemp(prefix="cctx-plain-"))
+        self.addCleanup(shutil.rmtree, plain, ignore_errors=True)
+        self.cc.script_dir = lambda: plain
+        code, out = self.run_cli("self-update")
+        self.assertNotEqual(code, 0)
+        self.assertIn("not a git clone", out)
+
+
+class _TtyOut(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class TestUpdateNotice(Base):
+    """Passive 'new version available' notice — cached, stderr, TTY-only."""
+
+    def _state(self, latest, checked_at=None):
+        import time
+        root = self.cc.REGISTRY_ROOT()
+        root.mkdir(parents=True, exist_ok=True)
+        self.cc._update_state_path().write_text(json.dumps({
+            "checked_at": int(time.time()) if checked_at is None else checked_at,
+            "latest": latest}))
+
+    def setUp(self):
+        super().setUp()
+        # never spawn a real background refresh from tests
+        self.spawned = []
+        self.cc._spawn_update_refresh = lambda: self.spawned.append(True)
+
+    def test_notice_when_cached_newer(self):
+        self._state("9.9.9")
+        s = _TtyOut()
+        self.cc._maybe_notify_update(stream=s)
+        self.assertIn("new version available", s.getvalue())
+        self.assertIn("9.9.9", s.getvalue())
+        self.assertIn("cloudctx self-update", s.getvalue())
+
+    def test_silent_when_current(self):
+        self._state(self.cc.__version__)
+        s = _TtyOut()
+        self.cc._maybe_notify_update(stream=s)
+        self.assertEqual(s.getvalue(), "")
+
+    def test_silent_on_non_tty(self):
+        self._state("9.9.9")
+        s = io.StringIO()  # isatty() False
+        self.cc._maybe_notify_update(stream=s)
+        self.assertEqual(s.getvalue(), "")
+
+    def test_silent_when_opted_out(self):
+        self._state("9.9.9")
+        os.environ["CLOUDCTX_NO_UPDATE_CHECK"] = "1"
+        s = _TtyOut()
+        self.cc._maybe_notify_update(stream=s)
+        self.assertEqual(s.getvalue(), "")
+
+    def test_machine_commands_never_notify(self):
+        # _env stdout is eval'd, _decorate stdout is raw escapes: a notice on
+        # those paths would be a shell-injection/garbage bug, not a nicety.
+        for cmd in ("_env", "_decorate", "_names", "exec", "self-update"):
+            self.assertNotIn(cmd, self.cc.NOTIFY_COMMANDS)
+        for cmd in ("list", "status", "login", "new", "delete", "show"):
+            self.assertIn(cmd, self.cc.NOTIFY_COMMANDS)
+
+    def test_stale_state_triggers_background_refresh(self):
+        self._state("0.0.1", checked_at=1)  # ancient
+        s = _TtyOut()
+        self.cc._maybe_notify_update(stream=s)
+        self.assertTrue(self.spawned)
+
+    def test_fresh_state_does_not_respawn(self):
+        self._state("0.0.1")  # checked_at = now
+        s = _TtyOut()
+        self.cc._maybe_notify_update(stream=s)
+        self.assertFalse(self.spawned)
+
+    def test_refresh_command_writes_state(self):
+        # reuse the self-update fixture: local remote with a known tag
+        helper = TestSelfUpdate()
+        helper.cc = self.cc
+        helper.addCleanup = self.addCleanup
+        helper.run_cli = self.run_cli
+        remote, install = helper._fixture()
+        helper._git(remote, "tag", "v9.9.9")
+        code, _ = self.run_cli("_refresh-update-check")
+        self.assertEqual(code, 0)
+        state = json.loads(self.cc._update_state_path().read_text())
+        self.assertEqual(state["latest"], "9.9.9")
+        self.assertGreater(state["checked_at"], 0)
+
+
 class TestInstall(Base):
     def test_install_prints_source_line(self):
         code, out = self.run_cli("install")
         self.assertEqual(code, 0)
         self.assertIn("source", out)
-        self.assertIn("ctx.zsh", out)
+        self.assertIn("cloudctx.zsh", out)
 
     def test_install_bash_variant(self):
         code, out = self.run_cli("install", "--shell", "bash")
-        self.assertIn("ctx.bash", out)
+        self.assertIn("cloudctx.bash", out)
 
     def test_install_write_appends_to_rc(self):
         os.environ["HOME"] = self.tmp
@@ -477,7 +810,89 @@ class TestInstall(Base):
         self.assertEqual(code, 0)
         rc = Path(self.tmp) / ".zshrc"
         self.assertTrue(rc.exists())
-        self.assertIn("ctx.zsh", rc.read_text())
+        self.assertIn("cloudctx.zsh", rc.read_text())
+
+    def test_install_write_is_idempotent(self):
+        # Review 2026-07-06 #3: a second --write must not duplicate the hook.
+        os.environ["HOME"] = self.tmp
+        self.run_cli("install", "--shell", "zsh", "--write")
+        code, out = self.run_cli("install", "--shell", "zsh", "--write")
+        self.assertEqual(code, 0)
+        self.assertIn("already", out.lower())
+        rc_text = (Path(self.tmp) / ".zshrc").read_text()
+        self.assertEqual(rc_text.count("cloudctx.zsh"), 1)
+
+
+class TestDelete(Base):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("new", "acme", "--display", "Acme AB", "--no-login")
+        self.run_cli("new", "globex", "--no-login")
+
+    def _delete(self, *args, stdin=""):
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        return subprocess.run([CLI, "delete", *args], env=env, input=stdin,
+                              capture_output=True, text=True)
+
+    def test_force_delete_removes_entry_and_store(self):
+        store = self.cc.context_dir("acme")
+        self.assertTrue(store.is_dir())
+        r = self._delete("acme", "--force")
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertNotIn("acme", self.cc.load_registry())
+        self.assertFalse(store.exists())
+        # profiles regenerated without the deleted context
+        profiles = Path(self.cc.profiles_path()).read_text()
+        self.assertNotIn("cloudctx-acme", profiles)
+        self.assertIn("cloudctx-globex", profiles)
+
+    def test_keep_store_deletes_entry_only(self):
+        store = self.cc.context_dir("acme")
+        r = self._delete("acme", "--force", "--keep-store")
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertNotIn("acme", self.cc.load_registry())
+        self.assertTrue(store.is_dir())
+
+    def test_unknown_context_errors(self):
+        r = self._delete("ghost", "--force")
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_prompt_no_aborts(self):
+        r = self._delete("acme", stdin="n\n")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("acme", self.cc.load_registry())
+        self.assertTrue(self.cc.context_dir("acme").is_dir())
+
+    def test_prompt_eof_aborts(self):
+        r = self._delete("acme", stdin="")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("acme", self.cc.load_registry())
+
+    def test_prompt_yes_deletes(self):
+        r = self._delete("acme", stdin="y\n")
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertNotIn("acme", self.cc.load_registry())
+
+    def test_warns_when_active_in_this_shell(self):
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        env["CLOUDCTX_CONTEXT"] = "acme"
+        r = subprocess.run([CLI, "delete", "acme", "--force"], env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("active in this shell", r.stderr)
+
+
+class TestVersion(Base):
+    def test_version_flag(self):
+        r = subprocess.run([CLI, "--version"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertRegex(r.stdout.strip(), r"^cloudctx \d+\.\d+\.\d+$")
+
+    def test_version_constant_matches_flag(self):
+        r = subprocess.run([CLI, "--version"], capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), f"cloudctx {self.cc.__version__}")
 
 
 if __name__ == "__main__":
