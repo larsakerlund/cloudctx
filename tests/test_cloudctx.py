@@ -623,6 +623,91 @@ class TestReviewFixes(Base):
         self.assertEqual(stat.S_IMODE(os.stat(self.cc.azure_dir("acme")).st_mode), 0o700)
 
 
+class TestSelfUpdate(Base):
+    """self-update against a local fixture remote — hermetic, no network."""
+
+    def _git(self, cwd, *args):
+        return subprocess.run(
+            ["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t",
+             *args], capture_output=True, text=True, check=True)
+
+    def _fixture(self):
+        """A 'remote' repo holding the real CLI file, and an install clone."""
+        remote = Path(tempfile.mkdtemp(prefix="cctx-remote-"))
+        self.addCleanup(shutil.rmtree, remote, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", str(remote)],
+                       check=True, capture_output=True)
+        shutil.copy(CLI, remote / "cloudctx")
+        self._git(remote, "add", "-A")
+        self._git(remote, "commit", "-qm", "initial")
+        parent = Path(tempfile.mkdtemp(prefix="cctx-install-"))
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        install = parent / "clone"
+        subprocess.run(["git", "clone", "-q", str(remote), str(install)],
+                       check=True, capture_output=True)
+        self.cc.script_dir = lambda: install
+        return remote, install
+
+    def _bump_remote(self, remote, version):
+        text = (remote / "cloudctx").read_text()
+        text = text.replace(f'__version__ = "{self.cc.__version__}"',
+                            f'__version__ = "{version}"')
+        (remote / "cloudctx").write_text(text)
+        self._git(remote, "commit", "-aqm", f"bump {version}")
+
+    def test_check_reports_update_available(self):
+        remote, install = self._fixture()
+        self._git(remote, "tag", "v9.9.9")
+        code, out = self.run_cli("self-update", "--check")
+        self.assertEqual(code, 0)
+        self.assertIn("update available", out)
+        self.assertIn("9.9.9", out)
+
+    def test_check_reports_up_to_date(self):
+        remote, install = self._fixture()
+        self._git(remote, "tag", f"v{self.cc.__version__}")
+        code, out = self.run_cli("self-update", "--check")
+        self.assertEqual(code, 0)
+        self.assertIn("up to date", out)
+
+    def test_update_pulls_and_reports_versions(self):
+        remote, install = self._fixture()
+        self._bump_remote(remote, "9.9.9")
+        code, out = self.run_cli("self-update")
+        self.assertEqual(code, 0, msg=out)
+        self.assertIn("updated:", out)
+        self.assertIn("9.9.9", out)
+        self.assertIn("new shell", out)
+        self.assertIn('__version__ = "9.9.9"',
+                      (install / "cloudctx").read_text())
+
+    def test_update_already_up_to_date(self):
+        remote, install = self._fixture()
+        code, out = self.run_cli("self-update")
+        self.assertEqual(code, 0, msg=out)
+        self.assertIn("already up to date", out)
+
+    def test_update_refuses_dirty_tree(self):
+        remote, install = self._fixture()
+        self._bump_remote(remote, "9.9.9")
+        with open(install / "cloudctx", "a") as f:
+            f.write("# local edit\n")
+        code, out = self.run_cli("self-update")
+        self.assertNotEqual(code, 0)
+        self.assertIn("local changes", out)
+        # nothing was pulled
+        self.assertNotIn('__version__ = "9.9.9"',
+                         (install / "cloudctx").read_text())
+
+    def test_update_refuses_non_clone(self):
+        plain = Path(tempfile.mkdtemp(prefix="cctx-plain-"))
+        self.addCleanup(shutil.rmtree, plain, ignore_errors=True)
+        self.cc.script_dir = lambda: plain
+        code, out = self.run_cli("self-update")
+        self.assertNotEqual(code, 0)
+        self.assertIn("not a git clone", out)
+
+
 class TestInstall(Base):
     def test_install_prints_source_line(self):
         code, out = self.run_cli("install")

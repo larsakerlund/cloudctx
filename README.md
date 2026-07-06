@@ -81,6 +81,8 @@ cloudctx claude acme ~/proj              # shorthand for the above
 cloudctx clear             # unset the vars + reset the window decoration
 cloudctx delete acme       # remove the registry entry AND ~/.cloudctx/acme
                            #   (asks first; --force to skip, --keep-store to keep files)
+cloudctx self-update       # git pull the install + regenerate iTerm2 profiles
+                           #   (--check only reports whether a newer tag exists)
 ```
 
 Add `--dry-run` to `login`/`open`/`claude` to print the commands instead of

@@ -19,7 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 ESC = "\x1b"
 BEL = "\x07"
@@ -800,6 +800,90 @@ def cmd_install(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# self-update — the install is a git clone (binary symlinked out of it), so
+# git is the update channel and vX.Y.Z tags are the versioning. --check is
+# passive and explicit-only: no command ever phones home on its own.
+# --------------------------------------------------------------------------
+TAG_RE = re.compile(r"refs/tags/v?(\d+)\.(\d+)\.(\d+)$")
+
+
+def _git(install_dir, *args, timeout=30):
+    """Run git in the install dir; None on timeout/missing git (never raise)."""
+    try:
+        return subprocess.run(["git", "-C", str(install_dir), *args],
+                              capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _latest_remote_version(install_dir):
+    """Highest vX.Y.Z tag on origin, as an int tuple — or None if unknowable."""
+    r = _git(install_dir, "ls-remote", "--tags", "origin", timeout=20)
+    if r is None or r.returncode != 0:
+        return None
+    best = None
+    for line in r.stdout.splitlines():
+        m = TAG_RE.search(line.strip())
+        if m:
+            v = tuple(int(x) for x in m.groups())
+            if best is None or v > best:
+                best = v
+    return best
+
+
+def cmd_self_update(args) -> int:
+    install = script_dir()
+    if not (install / ".git").exists():
+        return die(f"{install} is not a git clone — update it the same way "
+                   f"it was installed")
+
+    if args.check:
+        latest = _latest_remote_version(install)
+        if latest is None:
+            return die("could not read tags from origin (offline? no tags?)")
+        latest_s = ".".join(map(str, latest))
+        current = tuple(int(x) for x in __version__.split("."))
+        if latest > current:
+            print(f"update available: {__version__} -> {latest_s} "
+                  f"(run: cloudctx self-update)")
+        else:
+            print(f"up to date: {__version__} (latest tag: v{latest_s})")
+        return 0
+
+    r = _git(install, "status", "--porcelain")
+    if r is None or r.returncode != 0:
+        return die(f"could not run git in {install}")
+    if r.stdout.strip():
+        return die(f"local changes in {install} — commit or stash them first; "
+                   f"self-update never discards your edits")
+    before = (_git(install, "rev-parse", "HEAD") or r).stdout.strip()
+    pull = _git(install, "pull", "--ff-only", timeout=120)
+    if pull is None or pull.returncode != 0:
+        detail = pull.stderr.strip() if pull else "timed out"
+        return die(f"git pull --ff-only failed: {detail}")
+    after = (_git(install, "rev-parse", "HEAD") or pull).stdout.strip()
+    if before == after:
+        print(f"already up to date ({__version__})")
+        return 0
+
+    # Ask the NEW code for its version and let IT regenerate the iTerm2
+    # profiles — this running process still has the old logic in memory.
+    binpath = install / "cloudctx"
+    new_version = "?"
+    r = subprocess.run([sys.executable, str(binpath), "--version"],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        new_version = r.stdout.strip().replace("cloudctx ", "")
+    subprocess.run([sys.executable, str(binpath), "gen-profiles"],
+                   capture_output=True, text=True)  # tolerated on non-mac
+
+    print(f"updated: {__version__} -> {new_version} "
+          f"({before[:7]} -> {after[:7]})")
+    print("open a new shell (or re-source the shim) to finish.")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # use/clear stubs — the sourced shell function intercepts these before the
 # binary ever sees them (a child process can't export into its parent). If
 # they reach us, the shim isn't loaded; explain instead of an argparse error.
@@ -914,6 +998,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_gen = sub.add_parser("gen-profiles",
                            help="regenerate the iTerm2 dynamic profiles file")
     p_gen.set_defaults(func=cmd_gen_profiles)
+
+    p_up = sub.add_parser("self-update",
+                          help="update the install (git pull) + regen profiles")
+    p_up.add_argument("--check", action="store_true",
+                      help="only report whether a newer tag exists on origin")
+    p_up.set_defaults(func=cmd_self_update)
 
     p_install = sub.add_parser("install", help="print/write the shell-rc source line")
     p_install.add_argument("--shell", choices=["zsh", "bash"],
