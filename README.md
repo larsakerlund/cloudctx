@@ -100,6 +100,27 @@ subprocess, so any `az`/`aws`/Terraform it runs uses the context's isolated
 config automatically. **Only start Claude Code from a scoped shell** (after
 `ctx use`) or via `ctx claude <name> <path>`.
 
+### Agent Skill
+
+For agents whose shell state does *not* persist between commands (Claude Code runs
+each tool call in a fresh shell, so `ctx use` in one call is gone by the next),
+`skills/cloudctx/` ships a Claude Code [Agent Skill](https://code.claude.com/docs/en/skills)
+that teaches Claude to route every Azure command through `cloudctx exec <context> -- az …`
+on its own. It picks the matching context (or asks), selects the right subscription, and
+never falls back to bare `az` — so an agent can't touch the global `~/.azure` store or the
+wrong customer's subscription.
+
+Install it (personal — available in every project):
+
+```sh
+mkdir -p ~/.claude/skills
+ln -s "$(pwd)/skills/cloudctx" ~/.claude/skills/cloudctx   # or: cp -r skills/cloudctx ~/.claude/skills/
+```
+
+Then just ask Claude to do something in Azure — it triggers the skill from its description,
+no flags needed. The skill grants **no** `allowed-tools`, so `cloudctx` calls still go
+through Claude Code's normal permission prompts.
+
 ## Migration
 
 You have an existing `~/.azure` login. Two options:
