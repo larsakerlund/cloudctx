@@ -110,6 +110,22 @@ subprocess, so any `az`/`aws`/Terraform it runs uses the context's isolated
 config automatically. **Only start Claude Code from a scoped shell** (after
 `cloudctx use`) or via `cloudctx claude <name> <path>`.
 
+## Agent skill
+
+`skills/cloudctx/` is a [SKILL.md](https://github.com/anthropics/skills) that makes an AI
+coding agent run every Azure command as `cloudctx exec <context> -- az ...` instead of bare
+`az`. An agent's shell resets between commands, so a `cloudctx use` selection doesn't carry
+over to the next one; `exec` scopes each call in a single process. The skill reads the
+context list, uses `$CLOUDCTX_CONTEXT` when the session is already scoped, and asks instead
+of guessing when the target is ambiguous. It declares no `allowed-tools`, so `cloudctx`
+commands still go through the agent's own permission prompts.
+
+Install it with [`skills`](https://github.com/vercel-labs/skills):
+
+```sh
+npx skills add eliknut/cloudctx -g
+```
+
 ## Migration
 
 You have an existing `~/.azure` login. Two options:
