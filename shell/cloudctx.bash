@@ -93,6 +93,21 @@ else
   trap 'cloudctx_debug' DEBUG
 fi
 
+# --- tab completion --------------------------------------------------------
+_cloudctx_complete() {
+  local cur=${COMP_WORDS[COMP_CWORD]}
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=($(compgen -W "use clear new list show delete status login exec open claude gen-profiles install" -- "$cur"))
+  elif [ "$COMP_CWORD" -eq 2 ]; then
+    case "${COMP_WORDS[1]}" in
+      use|login|exec|open|claude|delete|show)
+        COMPREPLY=($(compgen -W "$(command cloudctx _names 2>/dev/null)" -- "$cur"))
+        ;;
+    esac
+  fi
+}
+complete -F _cloudctx_complete cloudctx
+
 # Show the active context (+ short Azure subscription label + AWS_PROFILE) in
 # the prompt. AWS_PROFILE is the only cloud indicator for an AWS-only context.
 PS1='${CLOUDCTX_CONTEXT:+\[\e[36m\][${CLOUDCTX_CONTEXT}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL}}${AWS_PROFILE:+ aws:${AWS_PROFILE}}]\[\e[0m\] }'"$PS1"

@@ -65,6 +65,28 @@ cloudctx_preexec() { _cloudctx_guard "$1"; }
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec cloudctx_preexec
 
+# --- tab completion --------------------------------------------------------
+# Registered only if compdef exists, i.e. compinit ran before this file was
+# sourced. If you source the shim earlier, run compinit first or re-source.
+_cloudctx() {
+  local -a subcmds names
+  subcmds=(use clear new list show delete status login exec open claude
+           gen-profiles install)
+  if (( CURRENT == 2 )); then
+    compadd -- $subcmds
+  elif (( CURRENT == 3 )); then
+    case "${words[2]}" in
+      use|login|exec|open|claude|delete|show)
+        names=(${(f)"$(command cloudctx _names 2>/dev/null)"})
+        compadd -- $names
+        ;;
+    esac
+  fi
+}
+if (( ${+functions[compdef]} )); then
+  compdef _cloudctx cloudctx
+fi
+
 # Show the active context (+ short Azure subscription label + AWS_PROFILE) in
 # the prompt. AWS_PROFILE is the only cloud indicator for an AWS-only context.
 # Single quotes + PROMPT_SUBST => re-evaluated on every redraw, stable per shell.

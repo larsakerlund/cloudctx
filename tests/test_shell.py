@@ -208,6 +208,41 @@ class TestShimZsh(unittest.TestCase):
         ''')
         self.assertEqual(extract(r.stdout), "yes|100%n", msg=r.stderr)
 
+    def test_completion_registered(self):
+        if self.shell == "zsh":
+            # compdef only exists after compinit; stub it to test registration
+            # hermetically, then assert our completer function is defined and
+            # was registered for the `cloudctx` command.
+            script = (
+                "compdef() { CCTX_REG=\"$*\"; }\n"
+                f"source {ROOT}/shell/cloudctx.zsh\n"
+                'print -r -- "CCTX=${+functions[_cloudctx]}|$CCTX_REG"\n'
+            )
+            r = subprocess.run(["zsh", "-f", "-c", script],
+                               env=self.env, capture_output=True, text=True)
+            self.assertEqual(extract(r.stdout), "1|_cloudctx cloudctx",
+                             msg=r.stderr)
+        else:
+            script = (f"source {ROOT}/shell/cloudctx.bash\n"
+                      'echo "CCTX=$(complete -p cloudctx 2>/dev/null)"\n')
+            r = subprocess.run(["bash", "--norc", "--noprofile", "-c", script],
+                               env=self.env, capture_output=True, text=True)
+            self.assertIn("_cloudctx_complete", extract(r.stdout) or "",
+                          msg=r.stderr)
+
+    def test_bash_completion_suggests_context_names(self):
+        if self.shell != "bash":
+            self.skipTest("bash completion internals")
+        script = (
+            f"source {ROOT}/shell/cloudctx.bash\n"
+            'COMP_WORDS=(cloudctx use ""); COMP_CWORD=2\n'
+            "_cloudctx_complete\n"
+            'echo "CCTX=${COMPREPLY[*]}"\n'
+        )
+        r = subprocess.run(["bash", "--norc", "--noprofile", "-c", script],
+                           env=self.env, capture_output=True, text=True)
+        self.assertIn("acme", extract(r.stdout) or "", msg=r.stderr)
+
     def test_bash_guard_composes_with_bash_preexec(self):
         # Finding #8 (coexistence): when bash-preexec is present, register as a
         # preexec function and DON'T seize the DEBUG trap, so other hooks survive.
