@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """cloudctx — per-window Azure/AWS CLI context isolation.
 
-A single, zero-dependency CLI. The sourced `ctx` shell shim eval's the output
-of `cloudctx _env <name>` to mutate the parent shell, and runs
-`cloudctx _decorate <name>` for iTerm2 visuals. Everything else runs here.
+A single, zero-dependency CLI. The sourced `cloudctx` shell function (which
+shadows this binary) eval's the output of `cloudctx _env <name>` to mutate the
+parent shell, and runs `cloudctx _decorate <name>` for iTerm2 visuals.
+Everything else runs here.
 
 Sections below: paths, TOML registry, color helpers, env emission,
 decorate emission, commands, argparse dispatch.
@@ -122,14 +123,14 @@ def cmd_new(args) -> int:
     if not args.no_login:
         return cmd_login(argparse.Namespace(
             name=name, dry_run=False, device_code=getattr(args, "device_code", False)))
-    print(f"next: authenticate with  ctx login {name}")
+    print(f"next: authenticate with  cloudctx login {name}")
     return 0
 
 
 def cmd_list(args) -> int:
     registry = load_registry()
     if not registry:
-        print("no contexts. Create one with: ctx new <name>")
+        print("no contexts. Create one with: cloudctx new <name>")
         return 0
     active = os.environ.get("CLOUDCTX_CONTEXT")
     for name in sorted(registry):
@@ -338,7 +339,7 @@ def _hex6(color: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Decorate emission — raw iTerm2 escape sequences. `ctx use` runs this WITHOUT
+# Decorate emission — raw iTerm2 escape sequences. `cloudctx use` runs this WITHOUT
 # command substitution so the bytes reach the controlling tty and render.
 # Verified sequences: badge needs base64; tab color is packed hex (no '#').
 # --------------------------------------------------------------------------
@@ -455,7 +456,7 @@ def cmd_exec(args) -> int:
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
     if not cmd:
-        return die("usage: ctx exec <name> -- <command> [args...]")
+        return die("usage: cloudctx exec <name> -- <command> [args...]")
     # Strip any managed vars inherited from the caller's shell before overlaying
     # this context's, so exec is fail-closed (no other context's AWS_* leaks in).
     env = {k: v for k, v in os.environ.items() if k not in CLEARABLE_VARS}
@@ -511,7 +512,7 @@ def cmd_status(args) -> int:
         elif status == "timeout":
             print("azure:   (timed out — network/VPN down?)")
         else:
-            print("azure:   not logged in (run: ctx login <name>)")
+            print("azure:   not logged in (run: cloudctx login <name>)")
     else:
         print("azure:   az CLI not installed")
 
@@ -541,7 +542,7 @@ def applescript_escape(s: str) -> str:
 
 
 def build_open_command(name: str, cd=None, claude=False) -> str:
-    parts = [f"ctx use {name}"]
+    parts = [f"cloudctx use {name}"]
     if cd:
         parts.append(f"cd {shquote(cd)}")
     if claude:
@@ -587,7 +588,7 @@ def cmd_open(args) -> int:
         print("\n".join(argv))
         return 0
     if not shutil.which("osascript"):
-        return die("osascript not found — `ctx open` needs macOS + iTerm2")
+        return die("osascript not found — `cloudctx open` needs macOS + iTerm2")
     return subprocess.run(argv).returncode
 
 
@@ -618,7 +619,7 @@ def build_profiles(registry: dict) -> dict:
         prof = {
             "Name": f"{display} (ctx)",
             "Guid": f"cloudctx-{name}",  # stable across regenerations
-            "Initial Text": f"ctx use {name}",
+            "Initial Text": f"cloudctx use {name}",
             "Custom Command": "No",
             "Command": "",
         }
@@ -662,7 +663,7 @@ def script_dir() -> Path:
 def cmd_install(args) -> int:
     requested = args.shell or os.path.basename(os.environ.get("SHELL", "zsh"))
     shell = "bash" if "bash" in requested else "zsh"
-    shim = script_dir() / "shell" / f"ctx.{shell}"
+    shim = script_dir() / "shell" / f"cloudctx.{shell}"
     rc = Path.home() / (".bashrc" if shell == "bash" else ".zshrc")
     line = f"source {shim}"
     if args.write:
@@ -682,6 +683,17 @@ def cmd_install(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# use/clear stubs — the sourced shell function intercepts these before the
+# binary ever sees them (a child process can't export into its parent). If
+# they reach us, the shim isn't loaded; explain instead of an argparse error.
+# --------------------------------------------------------------------------
+def cmd_use_stub(args) -> int:
+    return die("`cloudctx use`/`cloudctx clear` need the sourced shell "
+               "function, which isn't loaded in this shell. Run "
+               "`cloudctx install --write` and open a new shell.")
+
+
+# --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -692,6 +704,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_list = sub.add_parser("list", help="list contexts; mark the active one")
     p_list.set_defaults(func=cmd_list)
+
+    # Intercepted by the sourced shell function; stubs for shim-less shells.
+    p_use = sub.add_parser("use", help="select a context in this shell (needs the sourced shim)")
+    p_use.add_argument("name", nargs="?")
+    p_use.set_defaults(func=cmd_use_stub)
+    p_clear = sub.add_parser("clear", help="deselect the context (needs the sourced shim)")
+    p_clear.set_defaults(func=cmd_use_stub)
 
     p_new = sub.add_parser("new", help="scaffold a context + registry entry")
     p_new.add_argument("name")

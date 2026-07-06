@@ -1,18 +1,19 @@
 # cloudctx zsh shim — source this from ~/.zshrc:
-#     source /path/to/cloudctx/shell/ctx.zsh
+#     source /path/to/cloudctx/shell/cloudctx.zsh
 #
-# `ctx use`/`ctx clear` must mutate THIS shell, so they run here rather than in
+# `cloudctx use`/`cloudctx clear` must mutate THIS shell, so they run here rather than in
 # the binary (a child process can't export into its parent). Everything else
-# delegates to the `cloudctx` binary.
+# delegates to the `cloudctx` binary (via `command`, which bypasses
+# this function).
 
-ctx() {
+cloudctx() {
   emulate -L zsh
   case "$1" in
     use)
-      if [[ -z "$2" ]]; then print -u2 "usage: ctx use <name>"; return 1; fi
-      local _cctx_env
-      _cctx_env="$(command cloudctx _env "$2")" || return 1
-      eval "$_cctx_env"
+      if [[ -z "$2" ]]; then print -u2 "usage: cloudctx use <name>"; return 1; fi
+      local _cloudctx_env
+      _cloudctx_env="$(command cloudctx _env "$2")" || return 1
+      eval "$_cloudctx_env"
       command cloudctx _decorate "$2"
       ;;
     clear)
@@ -29,7 +30,7 @@ ctx() {
 # Guard takes a full command line, skips leading VAR=value assignments and
 # common wrappers (sudo/command/env/...), then warns if the real command is
 # az/aws with no context selected. Callable directly; also driven by preexec.
-_cctx_guard() {
+_cloudctx_guard() {
   emulate -L zsh
   # ${(z)} lexes like the shell itself: separators become standalone tokens
   # even unspaced (`cd x&&az` -> cd, x, &&, az) and quoted strings stay one
@@ -50,7 +51,7 @@ _cctx_guard() {
       *=*|-*|sudo|command|env|nice|nohup|time|builtin|exec|stdbuf) ;;
       az|aws)
         if [[ -z "$CLOUDCTX_CONTEXT" ]]; then
-          print -u2 "cloudctx: WARNING — '$w' run with no context selected (using global default store). Run 'ctx use <name>' first."
+          print -u2 "cloudctx: WARNING — '$w' run with no context selected (using global default store). Run 'cloudctx use <name>' first."
         fi
         expect=0
         ;;
@@ -60,7 +61,7 @@ _cctx_guard() {
 }
 
 # preexec receives the typed command line as $1.
-cloudctx_preexec() { _cctx_guard "$1"; }
+cloudctx_preexec() { _cloudctx_guard "$1"; }
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec cloudctx_preexec
 

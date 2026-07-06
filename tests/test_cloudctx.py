@@ -359,24 +359,24 @@ class TestOpen(Base):
         self.assertEqual(self.cc.applescript_escape('a"b\\c'), 'a\\"b\\\\c')
 
     def test_open_argv_new_window(self):
-        argv = self.cc.open_osascript_argv("ctx use acme", tab=False)
+        argv = self.cc.open_osascript_argv("cloudctx use acme", tab=False)
         self.assertEqual(argv[0], "osascript")
         self.assertIn("set _w to (create window with default profile)", argv)
-        self.assertIn('write text "ctx use acme"', argv)
+        self.assertIn('write text "cloudctx use acme"', argv)
 
     def test_open_argv_new_tab(self):
-        argv = self.cc.open_osascript_argv("ctx use acme", tab=True)
+        argv = self.cc.open_osascript_argv("cloudctx use acme", tab=True)
         self.assertIn("set _t to (create tab with default profile)", argv)
 
     def test_build_open_command_cd_and_claude(self):
         cmd = self.cc.build_open_command("acme", cd="/x", claude=True)
-        self.assertEqual(cmd, "ctx use acme && cd '/x' && claude")
+        self.assertEqual(cmd, "cloudctx use acme && cd '/x' && claude")
 
     def test_open_dry_run(self):
         self.run_cli("new", "acme", "--no-login")
         code, out = self.run_cli("open", "acme", "--dry-run")
         self.assertEqual(code, 0)
-        self.assertIn('write text "ctx use acme"', out)
+        self.assertIn('write text "cloudctx use acme"', out)
 
     def test_claude_dry_run_includes_claude(self):
         self.run_cli("new", "acme", "--no-login")
@@ -392,7 +392,7 @@ class TestProfiles(Base):
         self.assertEqual(len(prof["Profiles"]), 1)
         p = prof["Profiles"][0]
         self.assertEqual(p["Guid"], "cloudctx-acme")
-        self.assertEqual(p["Initial Text"], "ctx use acme")
+        self.assertEqual(p["Initial Text"], "cloudctx use acme")
         self.assertTrue(p["Use Tab Color"])
         self.assertAlmostEqual(p["Tab Color"]["Red Component"], 192 / 255)
         self.assertEqual(p["Tab Color"]["Color Space"], "sRGB")
@@ -519,11 +519,11 @@ class TestInstall(Base):
         code, out = self.run_cli("install")
         self.assertEqual(code, 0)
         self.assertIn("source", out)
-        self.assertIn("ctx.zsh", out)
+        self.assertIn("cloudctx.zsh", out)
 
     def test_install_bash_variant(self):
         code, out = self.run_cli("install", "--shell", "bash")
-        self.assertIn("ctx.bash", out)
+        self.assertIn("cloudctx.bash", out)
 
     def test_install_write_appends_to_rc(self):
         os.environ["HOME"] = self.tmp
@@ -531,7 +531,7 @@ class TestInstall(Base):
         self.assertEqual(code, 0)
         rc = Path(self.tmp) / ".zshrc"
         self.assertTrue(rc.exists())
-        self.assertIn("ctx.zsh", rc.read_text())
+        self.assertIn("cloudctx.zsh", rc.read_text())
 
     def test_install_write_is_idempotent(self):
         # Review 2026-07-06 #3: a second --write must not duplicate the hook.
@@ -541,7 +541,7 @@ class TestInstall(Base):
         self.assertEqual(code, 0)
         self.assertIn("already", out.lower())
         rc_text = (Path(self.tmp) / ".zshrc").read_text()
-        self.assertEqual(rc_text.count("ctx.zsh"), 1)
+        self.assertEqual(rc_text.count("cloudctx.zsh"), 1)
 
 
 class TestVersion(Base):

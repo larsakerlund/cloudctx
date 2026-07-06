@@ -1,17 +1,18 @@
 # cloudctx bash shim — source this from ~/.bashrc:
-#     source /path/to/cloudctx/shell/ctx.bash
+#     source /path/to/cloudctx/shell/cloudctx.bash
 #
-# `ctx use`/`ctx clear` must mutate THIS shell, so they run here rather than in
+# `cloudctx use`/`cloudctx clear` must mutate THIS shell, so they run here rather than in
 # the binary (a child process can't export into its parent). Everything else
-# delegates to the `cloudctx` binary.
+# delegates to the `cloudctx` binary (via `command`, which bypasses
+# this function).
 
-ctx() {
+cloudctx() {
   case "$1" in
     use)
-      if [[ -z "$2" ]]; then echo "usage: ctx use <name>" >&2; return 1; fi
-      local _cctx_env
-      _cctx_env="$(command cloudctx _env "$2")" || return 1
-      eval "$_cctx_env"
+      if [[ -z "$2" ]]; then echo "usage: cloudctx use <name>" >&2; return 1; fi
+      local _cloudctx_env
+      _cloudctx_env="$(command cloudctx _env "$2")" || return 1
+      eval "$_cloudctx_env"
       command cloudctx _decorate "$2"
       ;;
     clear)
@@ -28,7 +29,7 @@ ctx() {
 # Guard takes a full command line, skips leading VAR=value assignments and
 # common wrappers (sudo/command/env/...), then warns if the real command is
 # az/aws with no context selected. Callable directly; also driven by the trap.
-_cctx_guard() {
+_cloudctx_guard() {
   # Check every list/pipeline segment, not just the first: `cd x && az login`
   # and `echo y | az ...` must still warn. Quoted spans are stripped before
   # splitting so a separator inside a string argument is data, not a command
@@ -67,14 +68,14 @@ _cctx_guard() {
     case "${words[$i]:-}" in
       az|aws)
         if [ -z "$CLOUDCTX_CONTEXT" ]; then
-          echo "cloudctx: WARNING — '${words[$i]}' run with no context selected (using global default store). Run 'ctx use <name>' first." >&2
+          echo "cloudctx: WARNING — '${words[$i]}' run with no context selected (using global default store). Run 'cloudctx use <name>' first." >&2
         fi
         ;;
     esac
   done <<< "$line"
 }
 
-cloudctx_debug() { _cctx_guard "$BASH_COMMAND"; }
+cloudctx_debug() { _cloudctx_guard "$BASH_COMMAND"; }
 
 # Bash has no native preexec. If rcaloras/bash-preexec is loaded, register as a
 # preexec function so we compose with every other hook (starship/atuin/direnv,
@@ -86,8 +87,8 @@ cloudctx_debug() { _cctx_guard "$BASH_COMMAND"; }
 # would be a no-op that still clobbers it. If you use other DEBUG-trap tools,
 # load bash-preexec (then we take the preexec path above and nothing is lost).
 if declare -p preexec_functions >/dev/null 2>&1; then
-  _cctx_bp_preexec() { _cctx_guard "$1"; }
-  preexec_functions+=(_cctx_bp_preexec)
+  _cloudctx_bp_preexec() { _cloudctx_guard "$1"; }
+  preexec_functions+=(_cloudctx_bp_preexec)
 else
   trap 'cloudctx_debug' DEBUG
 fi

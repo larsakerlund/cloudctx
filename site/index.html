@@ -27,14 +27,14 @@
     <div class="demo">
       <div class="term acme">
         <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span>acme — Acme AB</div>
-        <pre><span class="prompt">$</span> ctx use acme
+        <pre><span class="prompt">$</span> cloudctx use acme
 <span class="out">✔ context: acme (Acme AB)</span>
 <span class="prompt">$</span> az account show --query name
 "Acme AB — Production"</pre>
       </div>
       <div class="term globex">
         <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span>globex — Globex Corp</div>
-        <pre><span class="prompt">$</span> ctx use globex
+        <pre><span class="prompt">$</span> cloudctx use globex
 <span class="out">✔ context: globex (Globex Corp)</span>
 <span class="prompt">$</span> az account show --query name
 "Globex — Dev"</pre>
@@ -60,7 +60,7 @@
 
   <section id="how">
     <div class="wrap">
-      <p class="eyebrow">ctx use acme</p>
+      <p class="eyebrow">cloudctx use acme</p>
       <h2>How it works</h2>
       <p class="prose">A <strong>context</strong> is a credential bundle under
       <code>~/.cloudctx/&lt;name&gt;/</code>. Selecting one exports a fixed set
@@ -76,21 +76,21 @@
         <tr><td>AWS_PROFILE</td><td>the context's profile name <em>(ditto)</em></td></tr>
       </table>
       </div>
-      <p class="prose">A tiny sourced shell function (<code>ctx</code>) does the part a binary
-      can't — mutating the parent shell — and everything else is a
-      zero-dependency Python CLI.</p>
+      <p class="prose">A tiny sourced shell function (also named <code>cloudctx</code>,
+      shadowing the binary) does the part a binary can't — mutating the parent
+      shell — and everything else is a zero-dependency Python CLI.</p>
     </div>
   </section>
 
   <section id="features">
     <div class="wrap">
-      <p class="eyebrow">ctx --help</p>
+      <p class="eyebrow">cloudctx --help</p>
       <h2>Features</h2>
       <div class="grid">
         <div class="card"><h3>The guard</h3><p>Run <code>az</code> or <code>aws</code> with no context selected and the shim warns you before you touch the global default store.</p></div>
         <div class="card"><h3>iTerm2 dynamic profiles</h3><p>Every context becomes an iTerm2 profile: pick a customer from the menu, get a correctly scoped, color-coded window.</p></div>
         <div class="card"><h3>Starship segment</h3><p>The active context sits in your prompt, so you always know which identity a window holds.</p></div>
-        <div class="card"><h3>ctx exec</h3><p>Run one command in a context — <code>ctx exec acme -- terraform plan</code> — without changing the shell you're in.</p></div>
+        <div class="card"><h3>cloudctx exec</h3><p>Run one command in a context — <code>cloudctx exec acme -- terraform plan</code> — without changing the shell you're in.</p></div>
         <div class="card"><h3>Claude Code ready</h3><p>Agents inherit the shell environment, so any <code>az</code> or Terraform they run stays inside the window's context.</p></div>
         <div class="card"><h3>AWS-ready registry</h3><p>AWS fields are first-class and exported when present. SSO login automation is on the roadmap.</p></div>
       </div>
@@ -106,30 +106,30 @@
         <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span>install</div>
         <pre>git clone https://github.com/eliknut/cloudctx ~/code/cloudctx
 ln -s ~/code/cloudctx/cloudctx ~/bin/cloudctx
-cloudctx install --write   <span class="out"># hook the ctx shim into your shell rc</span></pre>
+cloudctx install --write   <span class="out"># hook the shell shim into your rc</span></pre>
       </div>
     </div>
   </section>
 
   <section id="usage">
     <div class="wrap">
-      <p class="eyebrow">ctx &lt;command&gt;</p>
+      <p class="eyebrow">cloudctx &lt;command&gt;</p>
       <h2>Usage</h2>
       <div class="term">
         <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span>usage</div>
-        <pre>ctx new acme --display "Acme AB" --color "#c0392b" \
+        <pre>cloudctx new acme --display "Acme AB" --color "#c0392b" \
     --azure-tenant &lt;tenant-guid&gt; --azure-subscription "&lt;sub&gt;"
-ctx use acme      <span class="out"># scope THIS shell + badge the window</span>
-ctx status        <span class="out"># the REAL identity here: az account show</span>
-ctx exec acme -- terraform plan
-ctx claude acme ~/proj   <span class="out"># scoped iTerm2 window running Claude Code</span>
-ctx clear</pre>
+cloudctx use acme      <span class="out"># scope THIS shell + badge the window</span>
+cloudctx status        <span class="out"># the REAL identity here: az account show</span>
+cloudctx exec acme -- terraform plan
+cloudctx claude acme ~/proj   <span class="out"># scoped iTerm2 window running Claude Code</span>
+cloudctx clear</pre>
       </div>
       <div class="term">
         <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span>the guard</div>
-        <pre><span class="prompt">$</span> ctx clear
+        <pre><span class="prompt">$</span> cloudctx clear
 <span class="prompt">$</span> az account show
-<span class="warn">cloudctx: WARNING — 'az' run with no context selected. Run 'ctx use &lt;name&gt;' first.</span></pre>
+<span class="warn">cloudctx: WARNING — 'az' run with no context selected. Run 'cloudctx use &lt;name&gt;' first.</span></pre>
       </div>
     </div>
   </section>

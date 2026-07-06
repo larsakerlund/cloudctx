@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Per-window Azure/AWS CLI context isolation: zero-dependency Python 3.9+ CLI
-(`cloudctx`, stdlib only) + sourced shell shim (`shell/ctx.zsh`, `shell/ctx.bash`).
+(`cloudctx`, stdlib only) + sourced shell shim (`shell/cloudctx.zsh`, `shell/cloudctx.bash`).
 
 ## Commands
 
