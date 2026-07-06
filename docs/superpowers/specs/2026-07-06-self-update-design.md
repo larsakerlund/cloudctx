@@ -49,3 +49,20 @@ remote host, no HTTP client, no API parsing.
 Homebrew tap / PyPI (revisit when there are external users), auto-checks on
 normal commands (telemetry stance), updating live shells (impossible from a
 child process — the reminder is the honest UX).
+
+## 5. Amendment (same day): passive update notice
+
+User request: surface "a new version is available" during normal use.
+
+- Interactive commands (list, show, status, login, new, delete, open, claude,
+  gen-profiles, install) print a one-line notice to **stderr, TTY only**,
+  after their own output, when the cached latest-version exceeds
+  `__version__`: `cloudctx: new version available: a -> b — run 'cloudctx
+  self-update'`.
+- The cache (`$CLOUDCTX_HOME/.update-check.json`) is refreshed by a detached
+  background `_refresh-update-check` process at most every 24h; failures
+  still stamp `checked_at` so an offline machine doesn't respawn per command.
+  No foreground command ever waits on the network.
+- NEVER on `_env`/`_decorate`/`_names` (stdout is eval'd / raw escapes /
+  machine-parsed) or `exec` (script noise), never on stdout anywhere.
+- Opt out with `CLOUDCTX_NO_UPDATE_CHECK=1`. Version bumps to 1.3.0.
