@@ -222,11 +222,25 @@ def load_registry() -> dict:
     # `[../../evil]` can never be resolved into a path outside the store.
     clean = {}
     for key, value in data.items():
-        if NAME_RE.match(key):
-            clean[key] = value
-        else:
+        if not NAME_RE.match(key):
             print(f"cloudctx: warning: ignoring invalid context name {key!r} "
                   f"in {path}", file=sys.stderr)
+            continue
+        if not isinstance(value, dict):
+            print(f"cloudctx: warning: ignoring non-table entry {key!r} "
+                  f"in {path}", file=sys.stderr)
+            continue
+        # Values reach shquote()/encode() and az argv, so only strings are
+        # usable. Drop (never coerce) anything else: a hand-edited
+        # `azure_subscription = true` must not become the subscription "True".
+        entry = {}
+        for k, v in value.items():
+            if isinstance(v, str):
+                entry[k] = v
+            else:
+                print(f"cloudctx: warning: ignoring non-string value for "
+                      f"{k!r} in [{key}] in {path}", file=sys.stderr)
+        clean[key] = entry
     return clean
 
 

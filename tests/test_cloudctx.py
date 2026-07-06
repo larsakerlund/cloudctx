@@ -452,6 +452,22 @@ class TestReviewFixes(Base):
         self.assertEqual(r.returncode, 0, msg=r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
+    def test_load_registry_drops_non_string_values(self):
+        # Review 2026-07-06 #2: a hand-edited `flag = true` parses to a bool
+        # under tomllib (3.11+) and must never reach shquote/encode — and must
+        # not be coerced (bool True must not become subscription "True").
+        Path(self.cc.registry_path()).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.cc.registry_path()).write_text(
+            '[acme]\ndisplay = "Acme"\nflag = true\ncount = 3\n')
+        reg = self.cc.load_registry()
+        for entry in reg.values():
+            for v in entry.values():
+                self.assertIsInstance(v, str)
+        # _env must exit cleanly on such a context, not traceback.
+        code, out = self.run_cli("_env", "acme")
+        self.assertEqual(code, 0)
+        self.assertIn("export CLOUDCTX_CONTEXT='acme'", out)
+
     def test_permissions_locked_down(self):
         # Finding #9: registry root 0700, contexts.toml 0600, stores 0700.
         self.run_cli("new", "acme", "--no-login")
