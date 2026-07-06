@@ -490,6 +490,26 @@ def azure_login_cmds(entry, device_code=False):
     return cmds
 
 
+GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+
+
+def _verify_azure_login(name, entry, env) -> None:
+    """Post-login check: print the identity we actually landed on, and warn
+    loudly if it's a different tenant than the registry pins. Compared only
+    when both sides are GUID-shaped — a domain-form azure_tenant can't be
+    matched against the landed tenantId without a directory lookup."""
+    status, d = _probe_json(["az", "account", "show", "-o", "json"], env=env)
+    if status != "ok" or not isinstance(d, dict):
+        return  # login itself succeeded; verification is best-effort
+    print(f"logged in: {d.get('name')} ({d.get('id')})  tenant={d.get('tenantId')}")
+    want = entry.get("azure_tenant") or ""
+    got = d.get("tenantId") or ""
+    if GUID_RE.match(want) and GUID_RE.match(got) and want.lower() != got.lower():
+        print(f"cloudctx: WARNING — tenant MISMATCH: context {name!r} pins "
+              f"tenant {want} but this login landed in {got}. You may be "
+              f"authenticated against the wrong customer.", file=sys.stderr)
+
+
 def cmd_login(args) -> int:
     name = args.name
     registry = load_registry()
@@ -512,6 +532,8 @@ def cmd_login(args) -> int:
                 print("+ " + " ".join(vec))
                 if subprocess.run(vec, env=env).returncode != 0:
                     return die(f"`{' '.join(vec)}` failed")
+        if not getattr(args, "dry_run", False):
+            _verify_azure_login(name, entry, env)
     if has_aws:
         print(AWS_STUB.format(cfg=aws_config(name), cred=aws_credentials(name)))
     return 0

@@ -390,6 +390,44 @@ class TestLogin(Base):
         code, out = self.run_cli("login", "ghost", "--dry-run")
         self.assertNotEqual(code, 0)
 
+    GUID = "9fc151d1-62b8-402f-b07e-91533ff07e0d"
+
+    def _login_with_stub_az(self, registry_tenant, landed_tenant):
+        self.run_cli("new", "acme", "--azure-tenant", registry_tenant,
+                     "--no-login")
+        stubdir = tempfile.mkdtemp(prefix="stub-")
+        self.addCleanup(shutil.rmtree, stubdir, ignore_errors=True)
+        write_stub(
+            stubdir, "az",
+            'case "$1 $2" in\n'
+            '"account show") echo \'{"name":"Sub","id":"s-1",'
+            f'"tenantId":"{landed_tenant}"}}\' ;;\n'
+            '*) exit 0 ;;\n'
+            'esac')
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        env["PATH"] = stubdir + os.pathsep + env["PATH"]
+        return subprocess.run([CLI, "login", "acme"], env=env,
+                              capture_output=True, text=True)
+
+    def test_login_verifies_matching_tenant_quietly(self):
+        r = self._login_with_stub_az(self.GUID, self.GUID)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("logged in:", r.stdout)
+        self.assertNotIn("MISMATCH", r.stderr)
+
+    def test_login_warns_on_guid_tenant_mismatch(self):
+        other = "00000000-0000-0000-0000-000000000000"
+        r = self._login_with_stub_az(self.GUID, other)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)  # login itself succeeded
+        self.assertIn("MISMATCH", r.stderr)
+
+    def test_login_skips_comparison_for_domain_tenant(self):
+        # domain-form tenants can't be compared to the landed GUID — no warning
+        r = self._login_with_stub_az("contoso.onmicrosoft.com", self.GUID)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertNotIn("MISMATCH", r.stderr)
+
 
 class TestOpen(Base):
     def test_applescript_escape(self):
