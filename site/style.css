@@ -167,7 +167,7 @@ td:first-child { font-family: var(--mono); white-space: nowrap; color: var(--tex
 /* ---- feature grid ---- */
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
   gap: 1rem; margin-top: 1.75rem;
 }
 .card {
