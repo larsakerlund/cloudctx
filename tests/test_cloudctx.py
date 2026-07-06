@@ -544,6 +544,67 @@ class TestInstall(Base):
         self.assertEqual(rc_text.count("cloudctx.zsh"), 1)
 
 
+class TestDelete(Base):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("new", "acme", "--display", "Acme AB", "--no-login")
+        self.run_cli("new", "globex", "--no-login")
+
+    def _delete(self, *args, stdin=""):
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        return subprocess.run([CLI, "delete", *args], env=env, input=stdin,
+                              capture_output=True, text=True)
+
+    def test_force_delete_removes_entry_and_store(self):
+        store = self.cc.context_dir("acme")
+        self.assertTrue(store.is_dir())
+        r = self._delete("acme", "--force")
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertNotIn("acme", self.cc.load_registry())
+        self.assertFalse(store.exists())
+        # profiles regenerated without the deleted context
+        profiles = Path(self.cc.profiles_path()).read_text()
+        self.assertNotIn("cloudctx-acme", profiles)
+        self.assertIn("cloudctx-globex", profiles)
+
+    def test_keep_store_deletes_entry_only(self):
+        store = self.cc.context_dir("acme")
+        r = self._delete("acme", "--force", "--keep-store")
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertNotIn("acme", self.cc.load_registry())
+        self.assertTrue(store.is_dir())
+
+    def test_unknown_context_errors(self):
+        r = self._delete("ghost", "--force")
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_prompt_no_aborts(self):
+        r = self._delete("acme", stdin="n\n")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("acme", self.cc.load_registry())
+        self.assertTrue(self.cc.context_dir("acme").is_dir())
+
+    def test_prompt_eof_aborts(self):
+        r = self._delete("acme", stdin="")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("acme", self.cc.load_registry())
+
+    def test_prompt_yes_deletes(self):
+        r = self._delete("acme", stdin="y\n")
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertNotIn("acme", self.cc.load_registry())
+
+    def test_warns_when_active_in_this_shell(self):
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        env["CLOUDCTX_CONTEXT"] = "acme"
+        r = subprocess.run([CLI, "delete", "acme", "--force"], env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("active in this shell", r.stderr)
+
+
 class TestVersion(Base):
     def test_version_flag(self):
         r = subprocess.run([CLI, "--version"], capture_output=True, text=True)

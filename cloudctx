@@ -127,6 +127,38 @@ def cmd_new(args) -> int:
     return 0
 
 
+def cmd_delete(args) -> int:
+    name = args.name
+    registry = load_registry()
+    if name not in registry:
+        return die(f"unknown context {name!r}")
+    store = context_dir(name)
+    if os.environ.get("CLOUDCTX_CONTEXT") == name:
+        print(f"cloudctx: warning: {name!r} is active in this shell — run "
+              f"`cloudctx clear` after deleting.", file=sys.stderr)
+    if not args.force:
+        what = "registry entry" if args.keep_store else \
+            f"registry entry AND credential store {store} (tokens are wiped)"
+        try:
+            reply = input(f"delete context {name!r} — {what}? [y/N] ")
+        except EOFError:
+            reply = ""
+        if reply.strip().lower() not in ("y", "yes"):
+            print("aborted — nothing deleted")
+            return 1
+    del registry[name]
+    save_registry(registry)
+    if not args.keep_store and store.exists():
+        shutil.rmtree(store)
+    try:
+        write_profiles()
+    except OSError:
+        pass  # same tolerance as cmd_new: no iTerm2 dir on a non-mac box
+    kept = f" (store kept at {store})" if args.keep_store else ""
+    print(f"deleted context {name!r}{kept}")
+    return 0
+
+
 def cmd_list(args) -> int:
     registry = load_registry()
     if not registry:
@@ -704,6 +736,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_list = sub.add_parser("list", help="list contexts; mark the active one")
     p_list.set_defaults(func=cmd_list)
+
+    p_del = sub.add_parser("delete", help="delete a context (registry entry + credential store)")
+    p_del.add_argument("name")
+    p_del.add_argument("--force", action="store_true",
+                       help="skip the confirmation prompt")
+    p_del.add_argument("--keep-store", dest="keep_store", action="store_true",
+                       help="remove only the registry entry; keep ~/.cloudctx/<name>/")
+    p_del.set_defaults(func=cmd_delete)
 
     # Intercepted by the sourced shell function; stubs for shim-less shells.
     p_use = sub.add_parser("use", help="select a context in this shell (needs the sourced shim)")
