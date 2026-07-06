@@ -1,0 +1,205 @@
+/* cloudctx landing page — terminal-dark, zero external requests.
+   Signature: every terminal block is "scoped" with a context color stripe,
+   the same way cloudctx color-codes iTerm2 windows per customer. */
+
+:root {
+  --bg: #0f1115;
+  --panel: #151a21;
+  --edge: #232b36;
+  --text: #dde3ea;
+  --muted: #97a3b0;
+  --prompt: #33d17a;   /* green belongs to the shell prompt, nothing else */
+  --warn: #f5c451;
+  --acme: #e0604e;     /* context colors — the product's own feature */
+  --globex: #55a8e8;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, code, pre, .brand, .eyebrow { font-family: var(--mono); }
+
+a { color: var(--text); text-underline-offset: 3px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--prompt); outline-offset: 2px; }
+
+.wrap { max-width: 68rem; margin: 0 auto; padding: 0 1.25rem; }
+
+/* ---- nav + hero ---- */
+nav {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 1.5rem 0;
+}
+.brand { font-weight: 700; letter-spacing: -0.02em; }
+.brand::before { content: "❯ "; color: var(--prompt); }
+
+.hero { padding: 3.5rem 0 4.5rem; }
+.hero h1 {
+  font-size: clamp(1.65rem, 4.5vw, 2.7rem);
+  line-height: 1.25;
+  letter-spacing: -0.035em;
+  margin: 0 0 1.25rem;
+  max-width: 46rem;
+}
+.cursor {
+  display: inline-block;
+  width: 0.55em; height: 1em;
+  background: var(--prompt);
+  vertical-align: text-bottom;
+  margin-left: 0.15em;
+}
+.hero .pitch {
+  max-width: 42rem;
+  color: var(--muted);
+  font-size: 1.1rem;
+  margin: 0 0 2.25rem;
+}
+.hero .pitch code, section p code, td code {
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  padding: 0.05em 0.35em;
+  font-size: 0.92em;
+}
+
+.actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 3.25rem; }
+.btn {
+  display: inline-block;
+  padding: 0.6rem 1.15rem;
+  border-radius: 6px;
+  border: 1px solid var(--edge);
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+.btn:hover { border-color: var(--muted); }
+.btn.primary {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
+  font-weight: 700;
+}
+.btn.primary:hover { background: #ffffff; }
+
+/* ---- terminal chrome: each window is scoped to a context color ---- */
+.term {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.term + .term { margin-top: 1rem; }
+.term-bar {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.55rem 0.95rem;
+  border-bottom: 1px solid var(--edge);
+  border-top: 2px solid var(--muted);   /* the context stripe */
+  font-family: var(--mono); font-size: 0.75rem; color: var(--muted);
+}
+.term.acme .term-bar   { border-top-color: var(--acme);   color: var(--acme); }
+.term.globex .term-bar { border-top-color: var(--globex); color: var(--globex); }
+.dots { display: inline-flex; gap: 0.35rem; }
+.dots i { width: 0.65rem; height: 0.65rem; border-radius: 50%; background: var(--edge); }
+
+.term pre {
+  margin: 0; padding: 1rem 1.1rem;
+  overflow-x: auto;
+  font-size: 0.85rem; line-height: 1.75;
+}
+.term .prompt { color: var(--prompt); }
+.term .out { color: var(--muted); }
+.term .warn { color: var(--warn); }
+
+.copy-btn {
+  position: absolute; top: 0.35rem; right: 0.5rem;
+  background: var(--edge); color: var(--muted);
+  border: 0; border-radius: 5px;
+  font-family: var(--mono); font-size: 0.7rem;
+  padding: 0.3rem 0.65rem; cursor: pointer;
+}
+.copy-btn:hover, .copy-btn:focus-visible { color: var(--text); }
+
+/* ---- hero demo: two scoped windows, side by side ---- */
+.demo { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.demo .term + .term { margin-top: 0; }
+.demo-caption {
+  text-align: center; color: var(--muted);
+  font-family: var(--mono); font-size: 0.85rem;
+  margin-top: 1.25rem;
+}
+
+/* ---- sections: eyebrow is the command the section documents ---- */
+section { padding: 3.75rem 0; border-top: 1px solid var(--edge); }
+.eyebrow {
+  margin: 0 0 0.35rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.eyebrow::before { content: "$ "; color: var(--prompt); }
+section h2 {
+  font-size: 1.45rem;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.75rem;
+}
+section .prose { max-width: 44rem; color: var(--muted); margin: 0 0 1rem; }
+section .prose strong, section .prose em { color: var(--text); }
+
+/* ---- env table ---- */
+.env-scroll { overflow-x: auto; margin-top: 1.5rem; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 0.6rem 0.95rem; border: 1px solid var(--edge); }
+th { background: var(--panel); font-family: var(--mono); font-weight: 600; }
+td { color: var(--muted); }
+td:first-child { font-family: var(--mono); white-space: nowrap; color: var(--text); }
+
+/* ---- feature grid ---- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem; margin-top: 1.75rem;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  padding: 1.15rem 1.25rem;
+}
+.card h3 { margin: 0 0 0.45rem; font-size: 0.95rem; }
+.card h3::before { content: "❯ "; color: var(--prompt); }
+.card p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+
+/* ---- footer ---- */
+footer {
+  border-top: 1px solid var(--edge);
+  padding: 2rem 0 3rem;
+  color: var(--muted); font-family: var(--mono); font-size: 0.85rem;
+}
+footer .wrap { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: space-between; }
+footer a { color: var(--muted); }
+footer a:hover { color: var(--text); }
+
+/* ---- motion: one orchestrated moment, opt-in only ---- */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes rise { from { opacity: 0; transform: translateY(0.6rem); } to { opacity: 1; transform: none; } }
+  @keyframes blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
+  .demo .term { animation: rise 0.6s ease both; }
+  .demo .term:nth-child(2) { animation-delay: 0.18s; }
+  .cursor { animation: blink 1.2s steps(1) infinite; }
+}
+
+@media (max-width: 44rem) {
+  .demo { grid-template-columns: 1fr; }
+  .demo .term + .term { margin-top: 0; }
+}

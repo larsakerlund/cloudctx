@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cloudctx — per-window cloud CLI context isolation</title>
+<meta name="description" content="cloudctx pins each terminal window to exactly one named cloud identity. Isolated AZURE_CONFIG_DIR per context, so az login in one window never touches another.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <nav>
+      <span class="brand">cloudctx</span>
+      <a class="btn" href="https://github.com/eliknut/cloudctx">GitHub</a>
+    </nav>
+    <h1>One machine. Many customers.<br>Zero cross-contamination.<span class="cursor"></span></h1>
+    <p class="pitch">cloudctx pins each iTerm2 window to exactly one named cloud
+    identity, so <code>az login</code> or <code>az account set</code> in one
+    window can never silently change the active subscription in another.</p>
+    <div class="actions">
+      <a class="btn primary" href="#install">Install</a>
+      <a class="btn" href="#how">How it works</a>
+    </div>
+    <div class="demo">
+      <div class="term acme">
+        <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span>acme — Acme AB</div>
+        <pre><span class="prompt">$</span> ctx use acme
+<span class="out">✔ context: acme (Acme AB)</span>
+<span class="prompt">$</span> az account show --query name
+"Acme AB — Production"</pre>
+      </div>
+      <div class="term globex">
+        <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span>globex — Globex Corp</div>
+        <pre><span class="prompt">$</span> ctx use globex
+<span class="out">✔ context: globex (Globex Corp)</span>
+<span class="prompt">$</span> az account show --query name
+"Globex — Dev"</pre>
+      </div>
+    </div>
+    <p class="demo-caption">Two windows. Two tenants. Same machine, at the same time.</p>
+  </div>
+</header>
+
+<main>
+  <section id="problem">
+    <div class="wrap">
+      <p class="eyebrow">az account show</p>
+      <h2>The problem</h2>
+      <p class="prose">The Azure CLI keeps all of its state — the MSAL token cache <em>and</em>
+      the active subscription — inside a single directory,
+      <code>AZURE_CONFIG_DIR</code> (default <code>~/.azure</code>). Every shell
+      shares it. Log in to a different customer tenant in one window and every
+      other window silently repoints. If you work with multiple customers, that
+      is an incident waiting to happen.</p>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <p class="eyebrow">ctx use acme</p>
+      <h2>How it works</h2>
+      <p class="prose">A <strong>context</strong> is a credential bundle under
+      <code>~/.cloudctx/&lt;name&gt;/</code>. Selecting one exports a fixed set
+      of environment variables into the current shell — and because the active
+      Azure subscription lives <em>inside</em> <code>AZURE_CONFIG_DIR</code>,
+      two windows with different exports cannot interfere.</p>
+      <div class="env-scroll">
+      <table>
+        <tr><th>Variable</th><th>Points at</th></tr>
+        <tr><td>AZURE_CONFIG_DIR</td><td><code>~/.cloudctx/&lt;name&gt;/azure/</code> — token cache + active subscription</td></tr>
+        <tr><td>AWS_CONFIG_FILE</td><td><code>~/.cloudctx/&lt;name&gt;/aws/config</code> <em>(when the context defines AWS fields)</em></td></tr>
+        <tr><td>AWS_SHARED_CREDENTIALS_FILE</td><td><code>~/.cloudctx/&lt;name&gt;/aws/credentials</code> <em>(ditto)</em></td></tr>
+        <tr><td>AWS_PROFILE</td><td>the context's profile name <em>(ditto)</em></td></tr>
+      </table>
+      </div>
+      <p class="prose">A tiny sourced shell function (<code>ctx</code>) does the part a binary
+      can't — mutating the parent shell — and everything else is a
+      zero-dependency Python CLI.</p>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <p class="eyebrow">ctx --help</p>
+      <h2>Features</h2>
+      <div class="grid">
+        <div class="card"><h3>The guard</h3><p>Run <code>az</code> or <code>aws</code> with no context selected and the shim warns you before you touch the global default store.</p></div>
+        <div class="card"><h3>iTerm2 dynamic profiles</h3><p>Every context becomes an iTerm2 profile: pick a customer from the menu, get a correctly scoped, color-coded window.</p></div>
+        <div class="card"><h3>Starship segment</h3><p>The active context sits in your prompt, so you always know which identity a window holds.</p></div>
+        <div class="card"><h3>ctx exec</h3><p>Run one command in a context — <code>ctx exec acme -- terraform plan</code> — without changing the shell you're in.</p></div>
+        <div class="card"><h3>Claude Code ready</h3><p>Agents inherit the shell environment, so any <code>az</code> or Terraform they run stays inside the window's context.</p></div>
+        <div class="card"><h3>AWS-ready registry</h3><p>AWS fields are first-class and exported when present. SSO login automation is on the roadmap.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <p class="eyebrow">cloudctx install --write</p>
+      <h2>Install</h2>
+      <p class="prose">Requires Python 3.9+ (stdlib only) and, for Azure auth, the Azure CLI.</p>
+      <div class="term">
+        <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span>install</div>
+        <pre>git clone https://github.com/eliknut/cloudctx ~/code/cloudctx
+ln -s ~/code/cloudctx/cloudctx ~/bin/cloudctx
+cloudctx install --write   <span class="out"># hook the ctx shim into your shell rc</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <section id="usage">
+    <div class="wrap">
+      <p class="eyebrow">ctx &lt;command&gt;</p>
+      <h2>Usage</h2>
+      <div class="term">
+        <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span>usage</div>
+        <pre>ctx new acme --display "Acme AB" --color "#c0392b" \
+    --azure-tenant &lt;tenant-guid&gt; --azure-subscription "&lt;sub&gt;"
+ctx use acme      <span class="out"># scope THIS shell + badge the window</span>
+ctx status        <span class="out"># the REAL identity here: az account show</span>
+ctx exec acme -- terraform plan
+ctx claude acme ~/proj   <span class="out"># scoped iTerm2 window running Claude Code</span>
+ctx clear</pre>
+      </div>
+      <div class="term">
+        <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span>the guard</div>
+        <pre><span class="prompt">$</span> ctx clear
+<span class="prompt">$</span> az account show
+<span class="warn">cloudctx: WARNING — 'az' run with no context selected. Run 'ctx use &lt;name&gt;' first.</span></pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>cloudctx — <a href="https://github.com/eliknut/cloudctx">github.com/eliknut/cloudctx</a></span>
+    <span>hosted on <a href="https://github.com/larsakerlund/loft">Loft</a></span>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll(".term pre").forEach(function (pre) {
+  var btn = document.createElement("button");
+  btn.className = "copy-btn";
+  btn.textContent = "copy";
+  btn.addEventListener("click", function () {
+    navigator.clipboard.writeText(pre.textContent).then(function () {
+      btn.textContent = "copied";
+      setTimeout(function () { btn.textContent = "copy"; }, 1500);
+    });
+  });
+  pre.parentElement.appendChild(btn);
+});
+</script>
+
+</body>
+</html>
