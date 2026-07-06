@@ -30,31 +30,38 @@ cloudctx exec <context> -- az <args...>
 cloudctx exec acme -- az account show -o json
 cloudctx exec acme -- az group list -o table
 cloudctx exec acme -- az aks get-credentials -g rg-prod -n aks-prod
-cloudctx exec acme -- az login --device-code        # scoped, headless login
 cloudctx exec acme -- aws s3 ls                      # AWS too, if the context defines aws fields
 ```
 
 `--` is the separator — always include it. Any command works after it, not just `az`
 (e.g. `cloudctx exec acme -- terraform plan`).
 
+**Logging in is the exception:** use `cloudctx login <context>` (add `--device-code` for
+headless), never `az login` through `exec`. `cloudctx login` pins the context's tenant and
+verifies the landed identity against it; a raw `az login` skips both and can poison the
+store with the wrong tenant's token.
+
 ## Contexts currently on this machine
 
 !`cloudctx list`
 
-Empty output (`no contexts...`) means none exist yet — see "When no context exists".
+If it reports no contexts, none exist yet — see "When no context exists".
 
 ## Choosing the context
 
-1. Run `cloudctx list` (its output is shown above when available) and pick the context
-   matching the customer/tenant you were asked to act on.
-2. If the match is ambiguous, ASK the user — do not guess.
-3. Verify identity before anything destructive:
-   `cloudctx exec <context> -- cloudctx status` (prints account name/id/tenant/user).
+1. If `CLOUDCTX_CONTEXT` is already set, the session is scoped to that context — use it,
+   and do not switch to a different one without asking.
+2. Otherwise read the list above (re-run `cloudctx list` only if it isn't shown) and pick
+   the context matching the customer/tenant you were asked to act on.
+3. If the match is ambiguous, ask — do not guess.
+4. Before anything destructive, confirm the landed identity and that its tenant matches the
+   context: `cloudctx exec <context> -- cloudctx status`, checked against the `azure_tenant`
+   in `cloudctx show <context>`.
 
 ## When no context exists
 
-If `cloudctx list` shows `no contexts...` or none matches, STOP — do NOT fall back to
-bare `az`. Ask the user, then offer to create one:
+If no context matches, STOP — do NOT fall back to bare `az`. Ask the user, then offer to
+create one:
 
 ```sh
 cloudctx new <name> --display "Human Label" --azure-tenant <tenant-guid>
@@ -75,7 +82,7 @@ possibly wrong for the task. Before subscription-specific work:
 ```sh
 cloudctx exec <ctx> -- az account show -o table                      # active sub
 cloudctx exec <ctx> -- az account list -o table                      # all subs in this context
-cloudctx exec <ctx> -- az account set --subscription "<name-or-id>"  # switch (persists)
+cloudctx exec <ctx> -- az account set --subscription "<name-or-id>"  # switch; persists in the store, not via env
 ```
 
 Or scope one command without changing the active sub:

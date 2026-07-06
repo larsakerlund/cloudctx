@@ -100,19 +100,21 @@ subprocess, so any `az`/`aws`/Terraform it runs uses the context's isolated
 config automatically. **Only start Claude Code from a scoped shell** (after
 `ctx use`) or via `ctx claude <name> <path>`.
 
-### Agent Skill
+## Agent skill
 
-`skills/cloudctx/` is a Claude Code [Agent Skill](https://code.claude.com/docs/en/skills)
-that makes Claude route Azure commands through `cloudctx exec <context> -- az …` itself —
-its shell state doesn't persist between tool calls, so a bare `az` (or `cloudctx use` then a
-separate call) would miss the context. Install with [`skills`](https://github.com/vercel-labs/skills):
+`skills/cloudctx/` is a [SKILL.md](https://github.com/anthropics/skills) that makes an AI
+coding agent run every Azure command as `cloudctx exec <context> -- az ...` instead of bare
+`az`. An agent's shell resets between commands, so a `cloudctx use` selection doesn't carry
+over to the next one; `exec` scopes each call in a single process. The skill reads the
+context list, uses `$CLOUDCTX_CONTEXT` when the session is already scoped, and asks instead
+of guessing when the target is ambiguous. It declares no `allowed-tools`, so `cloudctx`
+commands still go through the agent's own permission prompts.
+
+Install it with [`skills`](https://github.com/vercel-labs/skills):
 
 ```sh
 npx skills add eliknut/cloudctx -g
 ```
-
-It grants no `allowed-tools`, so `cloudctx` calls still go through Claude Code's normal
-permission prompts.
 
 ## Migration
 
