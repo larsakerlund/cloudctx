@@ -165,9 +165,49 @@ def cmd_list(args) -> int:
         print("no contexts. Create one with: cloudctx new <name>")
         return 0
     active = os.environ.get("CLOUDCTX_CONTEXT")
+    if not getattr(args, "verbose", False):
+        for name in sorted(registry):
+            mark = "*" if name == active else " "
+            print(f"{mark} {name}")
+        return 0
+    rows = []
     for name in sorted(registry):
-        mark = "*" if name == active else " "
-        print(f"{mark} {name}")
+        entry = registry[name]
+        rows.append((
+            "*" if name == active else " ",
+            name,
+            entry.get("display", ""),
+            entry.get("azure_subscription") or entry.get("azure_tenant", ""),
+            entry.get("aws_profile", ""),
+        ))
+    headers = (" ", "NAME", "DISPLAY", "AZURE", "AWS_PROFILE")
+    widths = [max(len(r[i]) for r in rows + [headers]) for i in range(5)]
+    for row in [headers] + rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+    return 0
+
+
+def cmd_show(args) -> int:
+    registry = load_registry()
+    name = args.name
+    if name not in registry:
+        return die(f"unknown context {name!r}")
+    entry = registry[name]
+    print(f"[{name}]")
+    for key in sorted(entry):
+        print(f"{key} = {entry[key]}")
+    print()
+    az = azure_dir(name)
+    print(f"azure store:     {az}  {'(exists)' if az.is_dir() else '(missing)'}")
+    cfg, cred = aws_config(name), aws_credentials(name)
+    print(f"aws config:      {cfg}  {'(exists)' if cfg.is_file() else '(missing)'}")
+    print(f"aws credentials: {cred}  {'(exists)' if cred.is_file() else '(missing)'}")
+    return 0
+
+
+def cmd_names(args) -> int:
+    for name in sorted(load_registry()):
+        print(name)
     return 0
 
 
@@ -735,7 +775,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     p_list = sub.add_parser("list", help="list contexts; mark the active one")
+    p_list.add_argument("-v", "--verbose", action="store_true",
+                        help="show display/azure/aws columns")
     p_list.set_defaults(func=cmd_list)
+
+    p_show = sub.add_parser("show", help="show a context's registry entry + store paths")
+    p_show.add_argument("name")
+    p_show.set_defaults(func=cmd_show)
+
+    p_names = sub.add_parser("_names", help="(internal) bare context names, for completion")
+    p_names.set_defaults(func=cmd_names)
 
     p_del = sub.add_parser("delete", help="delete a context (registry entry + credential store)")
     p_del.add_argument("name")

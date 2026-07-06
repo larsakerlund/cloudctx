@@ -69,6 +69,43 @@ class TestList(Base):
         self.assertIn("no contexts", out.lower())
 
 
+class TestListVerboseShowNames(Base):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("new", "acme", "--display", "Acme AB",
+                     "--azure-tenant", "t-1", "--azure-subscription", "Prod Sub",
+                     "--no-login")
+        self.run_cli("new", "globex", "--aws-profile", "globex-ops", "--no-login")
+
+    def test_list_verbose_columns(self):
+        code, out = self.run_cli("list", "-v")
+        self.assertEqual(code, 0)
+        self.assertIn("Acme AB", out)
+        self.assertIn("Prod Sub", out)
+        self.assertIn("globex-ops", out)
+
+    def test_list_plain_output_unchanged(self):
+        code, out = self.run_cli("list")
+        self.assertEqual(code, 0)
+        self.assertNotIn("Acme AB", out)  # plain list stays terse
+
+    def test_show_prints_entry_and_paths(self):
+        code, out = self.run_cli("show", "acme")
+        self.assertEqual(code, 0)
+        self.assertIn("display = Acme AB", out)
+        self.assertIn("azure_subscription = Prod Sub", out)
+        self.assertIn(str(self.cc.azure_dir("acme")), out)
+
+    def test_show_unknown_context(self):
+        code, out = self.run_cli("show", "ghost")
+        self.assertNotEqual(code, 0)
+
+    def test_names_prints_bare_names(self):
+        code, out = self.run_cli("_names")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.split(), ["acme", "globex"])
+
+
 class TestRegistry(Base):
     def test_roundtrip(self):
         data = {"acme": {"display": "Acme AB", "color": "#c0392b",
