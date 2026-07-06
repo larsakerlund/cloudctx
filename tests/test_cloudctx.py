@@ -9,6 +9,7 @@ dir through $CLOUDCTX_HOME so nothing touches the real ~/.cloudctx.
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import shutil
 import stat
@@ -706,6 +707,90 @@ class TestSelfUpdate(Base):
         code, out = self.run_cli("self-update")
         self.assertNotEqual(code, 0)
         self.assertIn("not a git clone", out)
+
+
+class _TtyOut(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class TestUpdateNotice(Base):
+    """Passive 'new version available' notice — cached, stderr, TTY-only."""
+
+    def _state(self, latest, checked_at=None):
+        import time
+        root = self.cc.REGISTRY_ROOT()
+        root.mkdir(parents=True, exist_ok=True)
+        self.cc._update_state_path().write_text(json.dumps({
+            "checked_at": int(time.time()) if checked_at is None else checked_at,
+            "latest": latest}))
+
+    def setUp(self):
+        super().setUp()
+        # never spawn a real background refresh from tests
+        self.spawned = []
+        self.cc._spawn_update_refresh = lambda: self.spawned.append(True)
+
+    def test_notice_when_cached_newer(self):
+        self._state("9.9.9")
+        s = _TtyOut()
+        self.cc._maybe_notify_update(stream=s)
+        self.assertIn("new version available", s.getvalue())
+        self.assertIn("9.9.9", s.getvalue())
+        self.assertIn("cloudctx self-update", s.getvalue())
+
+    def test_silent_when_current(self):
+        self._state(self.cc.__version__)
+        s = _TtyOut()
+        self.cc._maybe_notify_update(stream=s)
+        self.assertEqual(s.getvalue(), "")
+
+    def test_silent_on_non_tty(self):
+        self._state("9.9.9")
+        s = io.StringIO()  # isatty() False
+        self.cc._maybe_notify_update(stream=s)
+        self.assertEqual(s.getvalue(), "")
+
+    def test_silent_when_opted_out(self):
+        self._state("9.9.9")
+        os.environ["CLOUDCTX_NO_UPDATE_CHECK"] = "1"
+        s = _TtyOut()
+        self.cc._maybe_notify_update(stream=s)
+        self.assertEqual(s.getvalue(), "")
+
+    def test_machine_commands_never_notify(self):
+        # _env stdout is eval'd, _decorate stdout is raw escapes: a notice on
+        # those paths would be a shell-injection/garbage bug, not a nicety.
+        for cmd in ("_env", "_decorate", "_names", "exec", "self-update"):
+            self.assertNotIn(cmd, self.cc.NOTIFY_COMMANDS)
+        for cmd in ("list", "status", "login", "new", "delete", "show"):
+            self.assertIn(cmd, self.cc.NOTIFY_COMMANDS)
+
+    def test_stale_state_triggers_background_refresh(self):
+        self._state("0.0.1", checked_at=1)  # ancient
+        s = _TtyOut()
+        self.cc._maybe_notify_update(stream=s)
+        self.assertTrue(self.spawned)
+
+    def test_fresh_state_does_not_respawn(self):
+        self._state("0.0.1")  # checked_at = now
+        s = _TtyOut()
+        self.cc._maybe_notify_update(stream=s)
+        self.assertFalse(self.spawned)
+
+    def test_refresh_command_writes_state(self):
+        # reuse the self-update fixture: local remote with a known tag
+        helper = TestSelfUpdate()
+        helper.cc = self.cc
+        helper.addCleanup = self.addCleanup
+        helper.run_cli = self.run_cli
+        remote, install = helper._fixture()
+        helper._git(remote, "tag", "v9.9.9")
+        code, _ = self.run_cli("_refresh-update-check")
+        self.assertEqual(code, 0)
+        state = json.loads(self.cc._update_state_path().read_text())
+        self.assertEqual(state["latest"], "9.9.9")
+        self.assertGreater(state["checked_at"], 0)
 
 
 class TestInstall(Base):

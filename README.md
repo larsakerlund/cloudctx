@@ -83,6 +83,9 @@ cloudctx delete acme       # remove the registry entry AND ~/.cloudctx/acme
                            #   (asks first; --force to skip, --keep-store to keep files)
 cloudctx self-update       # git pull the install + regenerate iTerm2 profiles
                            #   (--check only reports whether a newer tag exists)
+# interactive commands print a one-line stderr notice (TTY only, cached,
+# refreshed in the background at most daily) when a newer tag exists.
+# Opt out with CLOUDCTX_NO_UPDATE_CHECK=1.
 ```
 
 Add `--dry-run` to `login`/`open`/`claude` to print the commands instead of
