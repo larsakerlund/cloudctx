@@ -144,6 +144,42 @@ class TestShimZsh(unittest.TestCase):
         ''')
         self.assertEqual(extract(r.stdout), "[bare|]", msg=r.stderr)
 
+    def test_guard_catches_compound_and(self):
+        # Review 2026-07-06 #1: `cd x && az login` must still warn.
+        r = self.run_script('_cctx_guard "cd /tmp && az login"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_catches_pipeline(self):
+        r = self.run_script('_cctx_guard "echo hi | aws s3 ls"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_catches_semicolon(self):
+        r = self.run_script('_cctx_guard "true; az account show"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_catches_or_list(self):
+        r = self.run_script('_cctx_guard "false || az login"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_catches_stdbuf_flags(self):
+        # Review 2026-07-06 #5: wrapper flags (`stdbuf -oL az`) must be skipped.
+        r = self.run_script('_cctx_guard "stdbuf -oL az login"')
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def test_guard_silent_on_compound_without_cloud_cmds(self):
+        r = self.run_script('_cctx_guard "ls -la && echo done | wc -l"')
+        self.assertEqual(r.stderr.strip(), "", msg=r.stderr)
+
+    def test_guard_ignores_separators_inside_quotes(self):
+        # A quoted argument containing `&& az ...` is data, not a command.
+        r = self.run_script(
+            "_cctx_guard 'git commit -m \"wire up && az login flow\"'")
+        self.assertEqual(r.stderr.strip(), "", msg=r.stderr)
+
+    def test_guard_catches_unspaced_separators(self):
+        r = self.run_script("_cctx_guard 'cd /tmp&&az login'")
+        self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
     def test_guard_strips_wrappers(self):
         # Finding #15: `sudo az ...` should still trigger the guard.
         r = self.run_script('_cctx_guard "sudo az login"')

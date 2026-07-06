@@ -31,22 +31,32 @@ ctx() {
 # az/aws with no context selected. Callable directly; also driven by preexec.
 _cctx_guard() {
   emulate -L zsh
+  # ${(z)} lexes like the shell itself: separators become standalone tokens
+  # even unspaced (`cd x&&az` -> cd, x, &&, az) and quoted strings stay one
+  # word — so `cd x && az login` warns while `git commit -m "a && az b"`
+  # stays silent. Walk the tokens: after every separator we expect a new
+  # command; skip assignments/wrappers/flags, then check for az/aws.
   local -a words
   words=(${(z)1})
-  local i=1
-  while (( i <= ${#words} )); do
-    case "${words[i]}" in
-      *=*|sudo|command|env|nice|nohup|time|builtin|exec|stdbuf) (( i++ )) ;;
-      *) break ;;
+  local w
+  local -i expect=1
+  for w in $words; do
+    case $w in
+      '&&'|'||'|';'|'|'|'|&'|'&') expect=1; continue ;;
+    esac
+    (( expect )) || continue
+    case $w in
+      # skip assignments, wrappers, and wrapper flags (stdbuf -oL az ...)
+      *=*|-*|sudo|command|env|nice|nohup|time|builtin|exec|stdbuf) ;;
+      az|aws)
+        if [[ -z "$CLOUDCTX_CONTEXT" ]]; then
+          print -u2 "cloudctx: WARNING — '$w' run with no context selected (using global default store). Run 'ctx use <name>' first."
+        fi
+        expect=0
+        ;;
+      *) expect=0 ;;
     esac
   done
-  case "${words[i]}" in
-    az|aws)
-      if [[ -z "$CLOUDCTX_CONTEXT" ]]; then
-        print -u2 "cloudctx: WARNING — '${words[i]}' run with no context selected (using global default store). Run 'ctx use <name>' first."
-      fi
-      ;;
-  esac
 }
 
 # preexec receives the typed command line as $1.

@@ -29,22 +29,49 @@ ctx() {
 # common wrappers (sudo/command/env/...), then warns if the real command is
 # az/aws with no context selected. Callable directly; also driven by the trap.
 _cctx_guard() {
-  local -a words
-  read -ra words <<< "$1"
-  local i=0
-  while [ "$i" -lt "${#words[@]}" ]; do
-    case "${words[$i]}" in
-      *=*|sudo|command|env|nice|nohup|time|builtin|exec|stdbuf) i=$((i + 1)) ;;
-      *) break ;;
+  # Check every list/pipeline segment, not just the first: `cd x && az login`
+  # and `echo y | az ...` must still warn. Quoted spans are stripped before
+  # splitting so a separator inside a string argument is data, not a command
+  # boundary. (A lone escaped quote can still confuse the stripper — an
+  # acceptable edge for an advisory guard. bash 3.2 compatible.)
+  local raw="$1" line="" ch q="" seg nl=$'\n'
+  local -i n=${#raw} j
+  for ((j = 0; j < n; j++)); do
+    ch=${raw:j:1}
+    if [ -n "$q" ]; then
+      [ "$ch" = "$q" ] && q=""
+      continue
+    fi
+    case $ch in
+      \"|\') q=$ch ;;
+      *) line+=$ch ;;
     esac
   done
-  case "${words[$i]:-}" in
-    az|aws)
-      if [ -z "$CLOUDCTX_CONTEXT" ]; then
-        echo "cloudctx: WARNING — '${words[$i]}' run with no context selected (using global default store). Run 'ctx use <name>' first." >&2
-      fi
-      ;;
-  esac
+  line=${line//&&/$nl}
+  line=${line//||/$nl}
+  line=${line//;/$nl}
+  line=${line//|/$nl}
+  line=${line//&/$nl}
+  local -a words
+  local i
+  while IFS= read -r seg; do
+    read -ra words <<< "$seg"
+    i=0
+    while [ "$i" -lt "${#words[@]}" ]; do
+      case "${words[$i]}" in
+        # skip assignments, wrappers, and wrapper flags (stdbuf -oL az ...)
+        *=*|-*|sudo|command|env|nice|nohup|time|builtin|exec|stdbuf) i=$((i + 1)) ;;
+        *) break ;;
+      esac
+    done
+    case "${words[$i]:-}" in
+      az|aws)
+        if [ -z "$CLOUDCTX_CONTEXT" ]; then
+          echo "cloudctx: WARNING — '${words[$i]}' run with no context selected (using global default store). Run 'ctx use <name>' first." >&2
+        fi
+        ;;
+    esac
+  done <<< "$line"
 }
 
 cloudctx_debug() { _cctx_guard "$BASH_COMMAND"; }
