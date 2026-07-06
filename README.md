@@ -104,7 +104,7 @@ config automatically. **Only start Claude Code from a scoped shell** (after
 
 `skills/cloudctx/` is a Claude Code [Agent Skill](https://code.claude.com/docs/en/skills)
 that makes Claude route Azure commands through `cloudctx exec <context> -- az …` itself —
-its shell state doesn't persist between tool calls, so a bare `az` (or `ctx use` then a
+its shell state doesn't persist between tool calls, so a bare `az` (or `cloudctx use` then a
 separate call) would miss the context. Install with [`skills`](https://github.com/vercel-labs/skills):
 
 ```sh
