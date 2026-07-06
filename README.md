@@ -8,6 +8,10 @@ window can never silently change the active subscription in another.
 > first-class in the registry and exported when present, but the `aws sso login`
 > automation is not wired yet — see [AWS](#aws-status).
 
+**Website:** the landing page lives in [`site/`](site/) and is deployed to a
+[Loft](https://github.com/larsakerlund/loft) instance with
+`loft deploy site cloudctx` (zero build step — the folder is the artifact).
+
 ## Why
 
 The Azure CLI keeps all of its state — the MSAL token cache *and* the active
