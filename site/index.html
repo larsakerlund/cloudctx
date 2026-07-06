@@ -123,7 +123,9 @@ cloudctx use acme      <span class="out"># scope THIS shell + badge the window</
 cloudctx status        <span class="out"># the REAL identity here: az account show</span>
 cloudctx exec acme -- terraform plan
 cloudctx claude acme ~/proj   <span class="out"># scoped iTerm2 window running Claude Code</span>
-cloudctx clear</pre>
+cloudctx clear
+cloudctx delete acme   <span class="out"># offboard: registry entry + credential store</span>
+cloudctx self-update   <span class="out"># pull the latest version + regen profiles</span></pre>
       </div>
       <div class="term">
         <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span>the guard</div>
