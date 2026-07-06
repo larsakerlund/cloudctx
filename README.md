@@ -102,24 +102,17 @@ config automatically. **Only start Claude Code from a scoped shell** (after
 
 ### Agent Skill
 
-For agents whose shell state does *not* persist between commands (Claude Code runs
-each tool call in a fresh shell, so `ctx use` in one call is gone by the next),
-`skills/cloudctx/` ships a Claude Code [Agent Skill](https://code.claude.com/docs/en/skills)
-that teaches Claude to route every Azure command through `cloudctx exec <context> -- az …`
-on its own. It picks the matching context (or asks), selects the right subscription, and
-never falls back to bare `az` — so an agent can't touch the global `~/.azure` store or the
-wrong customer's subscription.
-
-Install it (personal — available in every project):
+`skills/cloudctx/` is a Claude Code [Agent Skill](https://code.claude.com/docs/en/skills)
+that makes Claude route Azure commands through `cloudctx exec <context> -- az …` itself —
+its shell state doesn't persist between tool calls, so a bare `az` (or `ctx use` then a
+separate call) would miss the context. Install with [`skills`](https://github.com/vercel-labs/skills):
 
 ```sh
-mkdir -p ~/.claude/skills
-ln -s "$(pwd)/skills/cloudctx" ~/.claude/skills/cloudctx   # or: cp -r skills/cloudctx ~/.claude/skills/
+npx skills add eliknut/cloudctx -g
 ```
 
-Then just ask Claude to do something in Azure — it triggers the skill from its description,
-no flags needed. The skill grants **no** `allowed-tools`, so `cloudctx` calls still go
-through Claude Code's normal permission prompts.
+It grants no `allowed-tools`, so `cloudctx` calls still go through Claude Code's normal
+permission prompts.
 
 ## Migration
 
