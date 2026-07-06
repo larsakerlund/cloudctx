@@ -533,6 +533,27 @@ class TestInstall(Base):
         self.assertTrue(rc.exists())
         self.assertIn("ctx.zsh", rc.read_text())
 
+    def test_install_write_is_idempotent(self):
+        # Review 2026-07-06 #3: a second --write must not duplicate the hook.
+        os.environ["HOME"] = self.tmp
+        self.run_cli("install", "--shell", "zsh", "--write")
+        code, out = self.run_cli("install", "--shell", "zsh", "--write")
+        self.assertEqual(code, 0)
+        self.assertIn("already", out.lower())
+        rc_text = (Path(self.tmp) / ".zshrc").read_text()
+        self.assertEqual(rc_text.count("ctx.zsh"), 1)
+
+
+class TestVersion(Base):
+    def test_version_flag(self):
+        r = subprocess.run([CLI, "--version"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertRegex(r.stdout.strip(), r"^cloudctx \d+\.\d+\.\d+$")
+
+    def test_version_constant_matches_flag(self):
+        r = subprocess.run([CLI, "--version"], capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), f"cloudctx {self.cc.__version__}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+__version__ = "1.1.0"
+
 ESC = "\x1b"
 BEL = "\x07"
 
@@ -664,6 +666,10 @@ def cmd_install(args) -> int:
     rc = Path.home() / (".bashrc" if shell == "bash" else ".zshrc")
     line = f"source {shim}"
     if args.write:
+        existing = rc.read_text(encoding="utf-8") if rc.exists() else ""
+        if line in existing:
+            print(f"already installed in {rc} — nothing to do.")
+            return 0
         with open(rc, "a", encoding="utf-8") as f:
             f.write(f"\n# cloudctx\n{line}\n")
         print(f"appended to {rc}:\n  {line}\nOpen a new shell to activate.")
@@ -680,6 +686,8 @@ def cmd_install(args) -> int:
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="cloudctx", description=__doc__.splitlines()[0])
+    p.add_argument("--version", action="version",
+                   version=f"cloudctx {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
     p_list = sub.add_parser("list", help="list contexts; mark the active one")
