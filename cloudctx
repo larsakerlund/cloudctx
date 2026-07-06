@@ -464,34 +464,64 @@ def cmd_exec(args) -> int:
         return die(f"command not found: {cmd[0]}")
 
 
+PROBE_TIMEOUT = 10.0  # seconds; a hung probe must not freeze the shell
+
+
+def _probe_timeout() -> float:
+    try:
+        return float(os.environ.get("CLOUDCTX_PROBE_TIMEOUT", PROBE_TIMEOUT))
+    except ValueError:
+        return PROBE_TIMEOUT
+
+
+def _probe_json(argv, timeout=None, env=None):
+    """Run a read-only identity probe (az/aws). Returns (status, data):
+    ("ok", parsed-json) on success, ("timeout", None) past the deadline,
+    ("error", None) for any other failure. Never raises."""
+    if timeout is None:
+        timeout = _probe_timeout()
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return "timeout", None
+    except OSError:
+        return "error", None
+    if r.returncode != 0:
+        return "error", None
+    try:
+        return "ok", json.loads(r.stdout)
+    except ValueError:
+        return "error", None
+
+
 def cmd_status(args) -> int:
     print(f"context: {os.environ.get('CLOUDCTX_CONTEXT', '(none)')}")
 
     if shutil.which("az"):
-        r = subprocess.run(["az", "account", "show", "-o", "json"],
-                           capture_output=True, text=True)
-        if r.returncode == 0:
-            try:
-                d = json.loads(r.stdout)
-                user = (d.get("user") or {}).get("name")
-                print(f"azure:   {d.get('name')} ({d.get('id')})  "
-                      f"tenant={d.get('tenantId')}  user={user}")
-            except (ValueError, AttributeError):
-                print("azure:   (could not parse `az account show`)")
+        status, d = _probe_json(["az", "account", "show", "-o", "json"])
+        if status == "ok" and isinstance(d, dict):
+            user = (d.get("user") or {}).get("name")
+            print(f"azure:   {d.get('name')} ({d.get('id')})  "
+                  f"tenant={d.get('tenantId')}  user={user}")
+        elif status == "ok":
+            print("azure:   (could not parse `az account show`)")
+        elif status == "timeout":
+            print("azure:   (timed out — network/VPN down?)")
         else:
             print("azure:   not logged in (run: ctx login <name>)")
     else:
         print("azure:   az CLI not installed")
 
     if shutil.which("aws"):
-        r = subprocess.run(["aws", "sts", "get-caller-identity", "--output", "json"],
-                           capture_output=True, text=True)
-        if r.returncode == 0:
-            try:
-                d = json.loads(r.stdout)
-                print(f"aws:     account={d.get('Account')}  arn={d.get('Arn')}")
-            except (ValueError, AttributeError):
-                print("aws:     (could not parse caller identity)")
+        status, d = _probe_json(["aws", "sts", "get-caller-identity",
+                                 "--output", "json"])
+        if status == "ok" and isinstance(d, dict):
+            print(f"aws:     account={d.get('Account')}  arn={d.get('Arn')}")
+        elif status == "ok":
+            print("aws:     (could not parse caller identity)")
+        elif status == "timeout":
+            print("aws:     (timed out — network/VPN down?)")
         else:
             print("aws:     not authenticated")
     else:

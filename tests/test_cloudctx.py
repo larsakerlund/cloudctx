@@ -287,6 +287,44 @@ class TestExecStatus(Base):
         self.assertIn("me@example.com", r.stdout)
 
 
+class TestProbe(Base):
+    """_probe_json: the timeout-guarded identity probe used by status/login."""
+
+    def test_probe_ok(self):
+        status, data = self.cc._probe_json(
+            ["sh", "-c", 'echo \'{"name": "x"}\''])
+        self.assertEqual(status, "ok")
+        self.assertEqual(data, {"name": "x"})
+
+    def test_probe_error_on_nonzero_exit(self):
+        status, data = self.cc._probe_json(["sh", "-c", "exit 1"])
+        self.assertEqual((status, data), ("error", None))
+
+    def test_probe_timeout(self):
+        status, data = self.cc._probe_json(["sleep", "5"], timeout=0.2)
+        self.assertEqual((status, data), ("timeout", None))
+
+    def test_probe_unparsable_output(self):
+        status, data = self.cc._probe_json(["sh", "-c", "echo not-json"])
+        self.assertEqual((status, data), ("error", None))
+
+    def test_status_reports_timeout_not_hang(self):
+        # Review 2026-07-06 #4: a hanging az must surface as a message, fast.
+        self.run_cli("new", "acme", "--azure-tenant", "t", "--no-login")
+        stubdir = tempfile.mkdtemp(prefix="stub-")
+        self.addCleanup(shutil.rmtree, stubdir, ignore_errors=True)
+        write_stub(stubdir, "az", "sleep 30")
+        write_stub(stubdir, "aws", "exit 1")
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        env["CLOUDCTX_PROBE_TIMEOUT"] = "0.2"
+        env["PATH"] = stubdir + os.pathsep + env["PATH"]
+        r = subprocess.run([CLI, "status"], env=env, capture_output=True,
+                           text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("timed out", r.stdout)
+
+
 class TestLogin(Base):
     def test_azure_login_cmds(self):
         entry = {"azure_tenant": "t", "azure_subscription": "s"}
